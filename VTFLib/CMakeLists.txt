@@ -52,6 +52,13 @@ if(VTFLIB_USE_COMPRESSONATOR)
             ${PROJECT_SOURCE_DIR}/lib/linux/${CMAKE_SYSTEM_PROCESSOR}
             ${PROJECT_SOURCE_DIR}/lib/linux/x86_64
         )
+    elseif(APPLE)
+        # macOS static libs live under lib/darwin/<arch>/ (built from source in CI).
+        list(APPEND _compressonator_search_paths
+            ${PROJECT_SOURCE_DIR}/lib/darwin/${CMAKE_SYSTEM_PROCESSOR}
+            ${PROJECT_SOURCE_DIR}/lib/darwin/arm64
+            ${PROJECT_SOURCE_DIR}/lib/darwin/x86_64
+        )
     endif()
 
     if(WIN32)
@@ -116,7 +123,7 @@ if(VTFLIB_USE_COMPRESSONATOR)
             endif()
         endif()
     else()
-        find_library(COMPRESSONATOR_LIB NAMES Compressonator compressonator
+        find_library(COMPRESSONATOR_LIB NAMES Compressonator compressonator CMP_Compressonator
             PATHS ${_compressonator_search_paths}
         )
         if(COMPRESSONATOR_LIB)
@@ -126,6 +133,13 @@ if(VTFLIB_USE_COMPRESSONATOR)
     endif()
 
     if(_vtflib_has_compressonator)
+        # Link CMP_Framework if available (needed by Yellow-Dog-Man fork builds)
+        find_library(CMP_FRAMEWORK_LIB NAMES CMP_Framework
+            PATHS ${_compressonator_search_paths}
+        )
+        if(CMP_FRAMEWORK_LIB)
+            target_link_libraries(vtflib PRIVATE ${CMP_FRAMEWORK_LIB})
+        endif()
         # Link all CMP_Core variants (base, SSE, AVX)
         find_library(CMP_CORE_LIB NAMES CMP_Core
             PATHS ${_compressonator_search_paths}
@@ -136,6 +150,9 @@ if(VTFLIB_USE_COMPRESSONATOR)
         find_library(CMP_CORE_AVX_LIB NAMES CMP_Core_AVX
             PATHS ${_compressonator_search_paths}
         )
+        find_library(CMP_CORE_AVX512_LIB NAMES CMP_Core_AVX512
+            PATHS ${_compressonator_search_paths}
+        )
         if(CMP_CORE_LIB)
             target_link_libraries(vtflib PRIVATE ${CMP_CORE_LIB})
         endif()
@@ -144,6 +161,9 @@ if(VTFLIB_USE_COMPRESSONATOR)
         endif()
         if(CMP_CORE_AVX_LIB)
             target_link_libraries(vtflib PRIVATE ${CMP_CORE_AVX_LIB})
+        endif()
+        if(CMP_CORE_AVX512_LIB)
+            target_link_libraries(vtflib PRIVATE ${CMP_CORE_AVX512_LIB})
         endif()
         target_compile_definitions(vtflib PRIVATE VTFLIB_HAS_COMPRESSONATOR)
         target_include_directories(vtflib PRIVATE ${PROJECT_SOURCE_DIR}/lib/include)

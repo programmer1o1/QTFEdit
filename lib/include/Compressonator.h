@@ -77,7 +77,7 @@ typedef double               CMP_DOUBLE;
 
 // Texture format.
 
-typedef enum
+typedef enum : CMP_UINT
 {
     CMP_FORMAT_Unknown = 0x0000,  // Undefined texture format.
 
@@ -380,6 +380,9 @@ typedef enum
 // function for printing std out info to users.
 typedef void(CMP_API* CMP_PrintInfoStr)(const char* InfoStr);
 
+// Pack CMP_CompressOptions to match Compressonator.NET
+#pragma pack(push)
+#pragma pack(1)
 // User options and setting used for processing
 typedef struct
 {
@@ -464,7 +467,6 @@ typedef struct
     CMP_INT iNormalBits;   // quantization bits for normal - default 10
     CMP_INT iGenericBits;  // quantization bits for generic - default 8
 
-#ifdef USE_3DMESH_OPTIMIZE
     CMP_INT iVcacheSize;      // For mesh vertices optimization, hardware vertex cache size. (value range 1 - no limit as it
                               // allows users to simulate hardware cache size to find the most optimum size)- default is enabled with cache size = 16
     CMP_INT iVcacheFIFOSize;  // For mesh vertices optimization, hardware vertex cache size. (value range 1 - no limit as it
@@ -474,7 +476,6 @@ typedef struct
     CMP_INT iSimplifyLOD;     // simplify mesh using LOD (Level of Details) value specified.(value range 1- no limit as it allows users
                               // to simplify the mesh until the level they desired. Higher level means less triangles drawn, less details.)
     bool bVertexFetch;        // optimize vertices fetch . boolean value 0 - disabled, 1-enabled. -default is enabled.
-#endif
 
     CMP_FORMAT SourceFormat;
     CMP_FORMAT DestFormat;
@@ -492,6 +493,8 @@ typedef struct
     CMP_BOOL useSRGBFrames;  // when using GPU HW for encoding and mipmap generation use SRGB frames, default is RGB
     CMP_INT  miplevels;      // miplevels to use when GPU is used to generate them
 } CMP_CompressOptions;
+
+#pragma pack(pop)
 
 //===================================
 // Definitions for CMP MipSet
@@ -838,7 +841,7 @@ typedef struct
     CMP_WORD dwMask;          // User can enable or disable specific modes default is 0xFFFF
     float    fExposure;       // Sets the image lighter (using larger values) or darker (using lower values) default is 0.95
     bool     bIsSigned;       // Specify if half floats are signed or unsigned BC6H_UF16 or BC6H_SF16
-    float    fQuality;        // Reserved: not used in BC6H at this time
+    float    fQuality;        // Quality of encoding. This value ranges between 0.0 and 1.0.
     bool     bUsePatternRec;  // Reserved: for new algorithm to use mono pattern shape matching based on two pixel planes
 } CMP_BC6H_BLOCK_PARAMETERS;
 
@@ -850,7 +853,7 @@ typedef struct
 //
 // Arguments and Settings:
 //
-//      quality       - Quality of encoding. This value ranges between 0.0 and 1.0. (Valid only for BC7 in this release) default is 0.01
+//      quality       - Quality of encoding. This value ranges between 0.0 and 1.0. default is 0.05f  
 //                      0.0 gives the fastest, lowest quality encoding, 1.0 is the slowest, highest quality encoding
 //                      In general even quality level 0.0 will give very good results on the vast majority of images
 //                      Higher quality settings may be needed for some difficult images (e.g. normal maps) to give good results
@@ -858,7 +861,7 @@ typedef struct
 //                      give very close to the highest possible quality, increasing the level above this will cause large
 //                      increases in encoding time for very marginal gains in quality
 //
-//      performance   - Perfromance of encoding. This value ranges between 0.0 and 1.0. (Valid only for BC7 in this release) Typical default is 1.0
+//      performance   - Performance of encoding. This value ranges between 0.0 and 1.0. (Valid only for BC7 in this release) Typical default is 1.0
 //                      Encoding time can be reduced by incresing this value for a given Quality level. Lower values will improve overall quality with
 //                        optimal setting been performed at a value of 0.
 //
@@ -965,6 +968,11 @@ CMP_ERROR CMP_API CMP_ConvertTexture(CMP_Texture*               pSourceTexture,
                                      const CMP_CompressOptions* pOptions,
                                      CMP_Feedback_Proc          pFeedbackProc);
 
+// A basic function that can turn a specific mipmap level of a mipset into a texture object
+// does not handle all cases perfectly
+// Originally found in applications/_plugins/common/cmdline.cpp
+CMP_ERROR CMP_API CMP_MipSetToTexture(const CMP_MipSet* mipSet, CMP_INT mipLevelIndex, CMP_Texture* pDestTexture);
+
 #ifdef __cplusplus
 };
 #endif
@@ -1054,6 +1062,12 @@ CMP_ERROR CMP_API CMP_ConvertMipTexture(CMP_MipSet* p_MipSetIn, CMP_MipSet* p_Mi
 //--------------------------------------------
 CMP_ERROR CMP_API  CMP_LoadTexture(const char* sourceFile, CMP_MipSet* pMipSet);
 CMP_ERROR CMP_API  CMP_SaveTexture(const char* destFile, CMP_MipSet* pMipSet);
+/// Saves a CMP_Texture to a file. For simple formats, this is a quick call to stb_image_write. 
+/// For more complex formats, a temporary mip set is created, therefore if you're working with a complex format, it is recommended to work with MipSets Directly.
+/// \param[in] destFile The destination file path
+/// \param[in] pTexture Pointer to the CMP_Texture to save
+/// \return CMP_OK if successful, otherwise an error code
+CMP_ERROR CMP_API  CMP_SaveTextureEx(const char* destFile, CMP_Texture* pTexture);
 CMP_ERROR CMP_API  CMP_ProcessTexture(CMP_MipSet* srcMipSet, CMP_MipSet* dstMipSet, KernelOptions kernelOptions, CMP_Feedback_Proc pFeedbackProc);
 CMP_ERROR CMP_API  CMP_CompressTexture(KernelOptions* options, CMP_MipSet srcMipSet, CMP_MipSet dstMipSet, CMP_Feedback_Proc pFeedback);
 CMP_VOID CMP_API   CMP_Format2FourCC(CMP_FORMAT format, CMP_MipSet* pMipSet);
@@ -1065,6 +1079,7 @@ CMP_ERROR CMP_API  CMP_GetPerformanceStats(KernelPerformanceStats* pPerfStats);
 CMP_ERROR CMP_API  CMP_GetDeviceInfo(KernelDeviceInfo* pDeviceInfo);
 CMP_BOOL CMP_API   CMP_IsCompressedFormat(CMP_FORMAT format);
 CMP_BOOL CMP_API   CMP_IsFloatFormat(CMP_FORMAT InFormat);
+CMP_BOOL CMP_API   CMP_IsValidFormat(CMP_FORMAT InFormat);
 
 //--------------------------------------------
 // CMP_Framework Lib: Host level interface

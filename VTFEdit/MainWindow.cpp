@@ -1317,6 +1317,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
 
     infoPath_ = new QLabel("-");
     infoPath_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    infoPath_->setWordWrap(true);
+    infoPath_->setMinimumWidth(80);
     infoLayout->addRow("Path:", infoPath_);
 
     infoVersion_ = new QLabel("-");
@@ -1339,6 +1341,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
 
     infoFlags_ = new QLabel("-");
     infoFlags_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    infoFlags_->setWordWrap(true);
     infoLayout->addRow("Flags:", infoFlags_);
 
     infoStartFrame_ = new QLabel("-");
@@ -1574,7 +1577,6 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     }
     connect(vmtEditor_->document(), &QObject::destroyed, this, [this] {
         vmtHighlighter_ = nullptr;
-        if(actionVmtHighlight_) actionVmtHighlight_->setChecked(false);
     });
     connect(vmtEditor_->document(), &QTextDocument::modificationChanged, this, [this](bool) {
         updateWindowTitle();
@@ -2930,11 +2932,11 @@ void MainWindow::liveValidateVmtTick() {
 void MainWindow::openFileDialog() {
     QSettings s;
     const QString startDir = s.value("paths/open_vtf").toString();
-    const QString path = QFileDialog::getOpenFileName(this, "Open VTF", startDir, "Valve Texture Format (*.vtf)");
+    const QString path = QFileDialog::getOpenFileName(this, "Open VTF", startDir, "Valve Texture Format (*.vtf);;All files (*)");
     if(path.isEmpty()) return;
     s.setValue("paths/open_vtf", QFileInfo(path).absolutePath());
     // Defer until after the native file dialog fully closes.
-    QTimer::singleShot(0, this, [this, path] { openVtf(path); });
+    QTimer::singleShot(0, this, [this, path] { openPath(path); });
 }
 
 void MainWindow::openRecentFile() {
@@ -2995,7 +2997,7 @@ void MainWindow::openVmtDialog() {
     if(!maybeSaveVmt()) return;
     QSettings s;
     const QString startDir = s.value("paths/open_vmt").toString();
-    const QString path = QFileDialog::getOpenFileName(this, "Open VMT", startDir, "Valve Material Type (*.vmt)");
+    const QString path = QFileDialog::getOpenFileName(this, "Open VMT", startDir, "Valve Material Type (*.vmt);;All files (*)");
     if(path.isEmpty()) return;
     s.setValue("paths/open_vmt", QFileInfo(path).absolutePath());
     openVmtFromPath(path);
@@ -3051,7 +3053,7 @@ void MainWindow::openMatchingVmtFromVtf() {
 
     QSettings s;
     const QString startDir = QFileInfo(currentPath_).absolutePath();
-    const QString path = QFileDialog::getOpenFileName(this, "Open VMT", startDir, "Valve Material Type (*.vmt)");
+    const QString path = QFileDialog::getOpenFileName(this, "Open VMT", startDir, "Valve Material Type (*.vmt);;All files (*)");
     if(path.isEmpty()) return;
     s.setValue("paths/open_vmt", QFileInfo(path).absolutePath());
     openVmtFromPath(path);
@@ -3336,7 +3338,7 @@ void MainWindow::saveVmtAs() {
     QSettings s;
     const QString startDir = s.value("paths/save_vmt").toString();
     const QString start = startDir.isEmpty() ? suggested : QDir(startDir).filePath(suggested);
-    const QString path = QFileDialog::getSaveFileName(this, "Save VMT As", start, "Valve Material Type (*.vmt)");
+    const QString path = QFileDialog::getSaveFileName(this, "Save VMT As", start, "Valve Material Type (*.vmt);;All files (*)");
     if(path.isEmpty()) return;
     s.setValue("paths/save_vmt", QFileInfo(path).absolutePath());
     currentVmtPath_ = path;

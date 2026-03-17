@@ -25,7 +25,7 @@ jobs:
         run: >-
           cmake -S . -B build
           -DCMAKE_BUILD_TYPE=Release
-          -DVTFLIB_USE_COMPRESSONATOR=${{ runner.os == 'Linux' && 'ON' || 'OFF' }}
+          -DVTFLIB_USE_COMPRESSONATOR=${{ runner.os != 'Windows' && 'ON' || 'OFF' }}
           -DVTFCMD_IMAGE_BACKEND=stb
           -DBUILD_VTFEDIT_QT=OFF
 
@@ -65,7 +65,7 @@ jobs:
         with:
           version: 6.8.3
           cache: true
-          arch: ${{ runner.os == 'Windows' && 'win64_msvc2022_64' || runner.os == 'macOS' && 'clang_64' || 'linux_gcc_64' }}
+          arch: ${{ runner.os == 'Windows' && 'win64_msvc2022_64' || runner.os == 'Linux' && 'linux_gcc_64' || '' }}
 
       - name: Install additional Linux dependencies
         if: runner.os == 'Linux'
@@ -156,6 +156,13 @@ jobs:
             dist/vtfeditqt.app \
             -always-overwrite \
             -verbose=2
+
+          # macdeployqt copies frameworks but may not fix LC_RPATH in the binary.
+          # Add the standard rpath so @rpath references resolve at runtime.
+          exe=dist/vtfeditqt.app/Contents/MacOS/vtfeditqt
+          if ! otool -l "$exe" | grep -A2 LC_RPATH | grep -q '@executable_path/../Frameworks'; then
+            install_name_tool -add_rpath @executable_path/../Frameworks "$exe"
+          fi
 
       - name: Add README
         shell: bash

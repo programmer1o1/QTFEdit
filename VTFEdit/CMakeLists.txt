@@ -54,6 +54,14 @@ add_executable(vtfeditqt
     MainWindow.cpp
 )
 
+set_target_properties(vtfeditqt PROPERTIES
+    MACOSX_BUNDLE_BUNDLE_NAME "QTFEdit"
+    MACOSX_BUNDLE_GUI_IDENTIFIER "com.qtfedit.vtfeditqt"
+    MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+    MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+    MACOSX_BUNDLE_INFO_STRING "QTFEdit - VTF/VMT Editor"
+)
+
 target_link_libraries(vtfeditqt
     PRIVATE
         vtflib

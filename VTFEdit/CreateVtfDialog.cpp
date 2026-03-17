@@ -110,7 +110,7 @@ CreateVtfDialog::CreateVtfDialog(QWidget *parent) : QDialog(parent) {
 
     // Disable formats we can’t encode (DXT typically requires a compressor; P8 is not supported).
     if(auto *model = qobject_cast<QStandardItemModel *>(format_->model())) {
-        bool anyDisabled = false;
+        bool dxtDisabled = false;
         for(int i = 0; i < format_->count(); ++i) {
             const auto fmt = static_cast<VTFImageFormat>(format_->itemData(i).toInt());
             const bool canEncode = vtflibCanEncode(fmt);
@@ -120,14 +120,14 @@ CreateVtfDialog::CreateVtfDialog(QWidget *parent) : QDialog(parent) {
                     if(fmt == IMAGE_FORMAT_DXT1 || fmt == IMAGE_FORMAT_DXT3 || fmt == IMAGE_FORMAT_DXT5 ||
                        fmt == IMAGE_FORMAT_DXT1_ONEBITALPHA) {
                         it->setToolTip("DXT encoding requires a compressor (e.g. Compressonator).");
+                        dxtDisabled = true;
                     } else {
                         it->setToolTip("This image format is not supported for creation by this build of VTFLib.");
                     }
                 }
-                anyDisabled = true;
             }
         }
-        if(anyDisabled) {
+        if(dxtDisabled) {
             compressionNote_->setText("DXT compression is unavailable on this build (Compressonator not found). "
                                       "Choose an uncompressed format (RGBA8888/BGRA8888) or install Compressonator and rebuild.");
         } else {

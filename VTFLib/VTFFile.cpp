@@ -2892,48 +2892,164 @@ vlBool CVTFFile::ConvertToRGBA8888(vlByte *lpSource, vlByte *lpDest, vlUInt uiWi
 //-----------------------------------------------------------------------------------------------------
 // DecompressDXTn(vlByte *src, vlByte *dst, vlUInt uiWidth, vlUInt uiHeight, VTFImageFormat SourceFormat)
 //
-// Converts data from the DXT1 to RGBA8888 format. Data is read from *src
-// and written to *dst. Width and height are needed to it knows how much data to process
+// Converts data from DXT1/3/5 to RGBA8888 format using a built-in software decoder.
+// Data is read from *src and written to *dst.
 //-----------------------------------------------------------------------------------------------------
+
+// Decode a single DXT colour block (shared by DXT1/3/5).
+// block points to 8 bytes: 2 x RGB565 endpoints + 4-byte index table.
+// out is a 4x4 RGBA pixel grid (64 bytes). isDXT1 enables the 1-bit alpha trick.
+static void DecodeDXTColorBlock(const vlByte *block, vlByte out[4*4*4], vlBool isDXT1)
+{
+	vlUInt c0 = (vlUInt)block[0] | ((vlUInt)block[1] << 8);
+	vlUInt c1 = (vlUInt)block[2] | ((vlUInt)block[3] << 8);
+
+	vlByte color[4][4]; // [index][RGBA]
+	// Expand RGB565 to RGB888
+	color[0][0] = (vlByte)(((c0 >> 11) & 0x1F) * 255 / 31);
+	color[0][1] = (vlByte)(((c0 >> 5)  & 0x3F) * 255 / 63);
+	color[0][2] = (vlByte)(( c0        & 0x1F) * 255 / 31);
+	color[0][3] = 255;
+	color[1][0] = (vlByte)(((c1 >> 11) & 0x1F) * 255 / 31);
+	color[1][1] = (vlByte)(((c1 >> 5)  & 0x3F) * 255 / 63);
+	color[1][2] = (vlByte)(( c1        & 0x1F) * 255 / 31);
+	color[1][3] = 255;
+
+	if (!isDXT1 || c0 > c1)
+	{
+		// 4-colour block
+		for (int c = 0; c < 3; c++)
+		{
+			color[2][c] = (vlByte)((2 * (vlUInt)color[0][c] + (vlUInt)color[1][c] + 1) / 3);
+			color[3][c] = (vlByte)(((vlUInt)color[0][c] + 2 * (vlUInt)color[1][c] + 1) / 3);
+		}
+		color[2][3] = 255;
+		color[3][3] = 255;
+	}
+	else
+	{
+		// 3-colour block + transparent
+		for (int c = 0; c < 3; c++)
+			color[2][c] = (vlByte)(((vlUInt)color[0][c] + (vlUInt)color[1][c]) / 2);
+		color[2][3] = 255;
+		color[3][0] = color[3][1] = color[3][2] = 0;
+		color[3][3] = 0; // transparent black
+	}
+
+	vlUInt indices = (vlUInt)block[4] | ((vlUInt)block[5] << 8) |
+	                 ((vlUInt)block[6] << 16) | ((vlUInt)block[7] << 24);
+
+	for (int i = 0; i < 16; i++)
+	{
+		vlUInt idx = (indices >> (i * 2)) & 0x3;
+		out[i * 4 + 0] = color[idx][0];
+		out[i * 4 + 1] = color[idx][1];
+		out[i * 4 + 2] = color[idx][2];
+		out[i * 4 + 3] = color[idx][3];
+	}
+}
+
+// Write a decoded 4x4 block into the destination image, handling edge clamping.
+static void WriteBlock(vlByte *dst, vlUInt imgW, vlUInt imgH, vlUInt bx, vlUInt by, const vlByte block[4*4*4])
+{
+	for (vlUInt py = 0; py < 4 && (by + py) < imgH; py++)
+		for (vlUInt px = 0; px < 4 && (bx + px) < imgW; px++)
+		{
+			vlUInt di = ((by + py) * imgW + (bx + px)) * 4;
+			vlUInt si = (py * 4 + px) * 4;
+			dst[di+0] = block[si+0];
+			dst[di+1] = block[si+1];
+			dst[di+2] = block[si+2];
+			dst[di+3] = block[si+3];
+		}
+}
+
 vlBool CVTFFile::DecompressDXTn(vlByte *src, vlByte *dst, vlUInt uiWidth, vlUInt uiHeight, VTFImageFormat SourceFormat)
 {
-#ifdef VTFLIB_HAS_COMPRESSONATOR
-	CMP_Texture srcTexture = {0};
-	srcTexture.dwSize     = sizeof( srcTexture );
-	srcTexture.dwWidth    = uiWidth;
-	srcTexture.dwHeight   = uiHeight;
-	srcTexture.dwPitch    = 0;
-	srcTexture.format     = GetCMPFormat( SourceFormat, false );
-	srcTexture.dwDataSize = CMP_CalculateBufferSize( &srcTexture );
-	srcTexture.pData      = (CMP_BYTE*) src;
+	vlUInt blocksX = (uiWidth  + 3) / 4;
+	vlUInt blocksY = (uiHeight + 3) / 4;
+	const vlByte *in = src;
 
-	CMP_CompressOptions options = {0};
-	options.dwSize        = sizeof(options);
-	options.fquality      = 1.0f;
-	options.dwnumThreads  = 0;
-	options.bDXT1UseAlpha = SourceFormat == ( IMAGE_FORMAT_DXT1_ONEBITALPHA | IMAGE_FORMAT_DXT1 );
-
-	CMP_Texture destTexture = {0};
-	destTexture.dwSize     = sizeof( destTexture );
-	destTexture.dwWidth    = uiWidth;
-	destTexture.dwHeight   = uiHeight;
-	destTexture.dwPitch    = 4 * uiWidth;
-	destTexture.format     = CMP_FORMAT_RGBA_8888;
-	destTexture.dwDataSize = destTexture.dwPitch * uiHeight;
-	destTexture.pData      = (CMP_BYTE*) dst;
-
-	CMP_ERROR cmp_status = CMP_ConvertTexture( &srcTexture, &destTexture, &options, NULL );
-	if (cmp_status != CMP_OK)
+	for (vlUInt by = 0; by < blocksY; by++)
 	{
-		LastError.Set( GetCMPErrorString( cmp_status ) );
-		return vlFalse;
+		for (vlUInt bx = 0; bx < blocksX; bx++)
+		{
+			vlByte pixels[4*4*4]; // 4x4 RGBA
+
+			switch (SourceFormat)
+			{
+			case IMAGE_FORMAT_DXT1:
+			case IMAGE_FORMAT_DXT1_ONEBITALPHA:
+			{
+				DecodeDXTColorBlock(in, pixels, SourceFormat == IMAGE_FORMAT_DXT1_ONEBITALPHA);
+				in += 8;
+				break;
+			}
+			case IMAGE_FORMAT_DXT3:
+			{
+				// 8 bytes of explicit alpha, then 8 bytes of colour
+				const vlByte *alphaBlock = in;
+				DecodeDXTColorBlock(in + 8, pixels, vlFalse);
+				// Apply explicit 4-bit alpha
+				for (int i = 0; i < 16; i++)
+				{
+					int byteIdx = i / 2;
+					int nibble = (i & 1) ? (alphaBlock[byteIdx] >> 4) : (alphaBlock[byteIdx] & 0x0F);
+					pixels[i * 4 + 3] = (vlByte)(nibble * 17); // 0-15 -> 0-255
+				}
+				in += 16;
+				break;
+			}
+			case IMAGE_FORMAT_DXT5:
+			{
+				// 8 bytes of interpolated alpha, then 8 bytes of colour
+				vlByte alpha0 = in[0];
+				vlByte alpha1 = in[1];
+				vlByte alphaLUT[8];
+				alphaLUT[0] = alpha0;
+				alphaLUT[1] = alpha1;
+				if (alpha0 > alpha1)
+				{
+					alphaLUT[2] = (vlByte)((6 * (vlUInt)alpha0 + 1 * (vlUInt)alpha1 + 3) / 7);
+					alphaLUT[3] = (vlByte)((5 * (vlUInt)alpha0 + 2 * (vlUInt)alpha1 + 3) / 7);
+					alphaLUT[4] = (vlByte)((4 * (vlUInt)alpha0 + 3 * (vlUInt)alpha1 + 3) / 7);
+					alphaLUT[5] = (vlByte)((3 * (vlUInt)alpha0 + 4 * (vlUInt)alpha1 + 3) / 7);
+					alphaLUT[6] = (vlByte)((2 * (vlUInt)alpha0 + 5 * (vlUInt)alpha1 + 3) / 7);
+					alphaLUT[7] = (vlByte)((1 * (vlUInt)alpha0 + 6 * (vlUInt)alpha1 + 3) / 7);
+				}
+				else
+				{
+					alphaLUT[2] = (vlByte)((4 * (vlUInt)alpha0 + 1 * (vlUInt)alpha1 + 2) / 5);
+					alphaLUT[3] = (vlByte)((3 * (vlUInt)alpha0 + 2 * (vlUInt)alpha1 + 2) / 5);
+					alphaLUT[4] = (vlByte)((2 * (vlUInt)alpha0 + 3 * (vlUInt)alpha1 + 2) / 5);
+					alphaLUT[5] = (vlByte)((1 * (vlUInt)alpha0 + 4 * (vlUInt)alpha1 + 2) / 5);
+					alphaLUT[6] = 0;
+					alphaLUT[7] = 255;
+				}
+				// 6 bytes of 3-bit alpha indices (48 bits for 16 texels)
+				vlUInt64 alphaBits = 0;
+				for (int i = 0; i < 6; i++)
+					alphaBits |= ((vlUInt64)in[2 + i]) << (8 * i);
+
+				DecodeDXTColorBlock(in + 8, pixels, vlFalse);
+				for (int i = 0; i < 16; i++)
+				{
+					vlUInt idx = (vlUInt)((alphaBits >> (3 * i)) & 0x7);
+					pixels[i * 4 + 3] = alphaLUT[idx];
+				}
+				in += 16;
+				break;
+			}
+			default:
+				LastError.Set("Unsupported DXT format for decompression.");
+				return vlFalse;
+			}
+
+			WriteBlock(dst, uiWidth, uiHeight, bx * 4, by * 4, pixels);
+		}
 	}
 
 	return vlTrue;
-#else
-	LastError.Set("DXT decompression not available (Compressonator not found).");
-	return vlFalse;
-#endif
 }
 //
 // ConvertFromRGBA8888()
