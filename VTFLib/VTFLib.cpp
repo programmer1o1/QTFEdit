@@ -40,6 +40,8 @@ namespace VTFLib
 
 	vlSingle sFP16HDRExposure = 2.0f;
 
+	vlSingle sDXTQuality = 1.0f;
+
 	vlUInt uiVMTParseMode = PARSE_MODE_LOOSE;
 }
 
@@ -227,6 +229,9 @@ VTFLIB_API vlSingle vlGetFloat(VTFLibOption Option)
 
 	case VTFLIB_FP16_HDR_EXPOSURE:
 		return sFP16HDRExposure;
+
+	case VTFLIB_DXT_QUALITY:
+		return sDXTQuality;
 	}
 
 	return 0.0f;
@@ -254,6 +259,14 @@ VTFLIB_API vlVoid vlSetFloat(VTFLibOption Option, vlSingle sValue)
 
 	case VTFLIB_FP16_HDR_EXPOSURE:
 		sFP16HDRExposure = sValue;
+		break;
+
+	case VTFLIB_DXT_QUALITY:
+		if(sValue < 0.0f)
+			sValue = 0.0f;
+		else if(sValue > 1.0f)
+			sValue = 1.0f;
+		sDXTQuality = sValue;
 		break;
 	}
 }

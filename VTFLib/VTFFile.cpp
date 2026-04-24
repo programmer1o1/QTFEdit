@@ -26,6 +26,53 @@
 using namespace VTFLib;
 using namespace std;
 
+// Map VTFLib's filter enum (inherited from DevIL's wider set) to what stbir v2 actually supports.
+// stbir v2 supports only: BOX, TRIANGLE, CUBICBSPLINE, CATMULLROM, MITCHELL, POINT_SAMPLE.
+// The exotic windowed-sinc variants (Kaiser, Sinc, Hanning, Hamming, Blackman, Bessel, Gaussian,
+// Quadratic) are remapped to the closest-quality stbir filter. Prior versions of this code cast
+// VTFMipmapFilter directly to stbir_filter via `stbir_filter(MipmapFilter)`, which produced out-of-
+// range values for filters past MITCHELL and tripped an internal stbir assertion at mipmap-generation
+// time.
+static stbir_filter VTFFilterToStbirFilter(VTFMipmapFilter filter)
+{
+	switch(filter)
+	{
+	case MIPMAP_FILTER_BOX:
+	case MIPMAP_FILTER_NICE:
+		return STBIR_FILTER_BOX;
+	case MIPMAP_FILTER_TRIANGLE:
+	case MIPMAP_FILTER_GAUSSIAN:
+	case MIPMAP_FILTER_BESSEL:
+		return STBIR_FILTER_TRIANGLE;
+	case MIPMAP_FILTER_CUBIC:
+	case MIPMAP_FILTER_QUADRATIC:
+		return STBIR_FILTER_CUBICBSPLINE;
+	case MIPMAP_FILTER_CATROM:
+	case MIPMAP_FILTER_SINC:
+		return STBIR_FILTER_CATMULLROM;
+	case MIPMAP_FILTER_MITCHELL:
+	case MIPMAP_FILTER_HANNING:
+	case MIPMAP_FILTER_HAMMING:
+	case MIPMAP_FILTER_BLACKMAN:
+	case MIPMAP_FILTER_KAISER:
+		return STBIR_FILTER_MITCHELL;
+	case MIPMAP_FILTER_POINT:
+		return STBIR_FILTER_POINT_SAMPLE;
+	case MIPMAP_FILTER_DEFAULT:
+	case MIPMAP_FILTER_COUNT:
+	default:
+		return STBIR_FILTER_DEFAULT;
+	}
+}
+
+// NICE forces sRGB-aware downsample regardless of the caller-provided bSRGB flag — that's the
+// whole point of the filter (Valve's half-pixel box filter was designed for gamma-correct mip
+// generation). Callers OR this on top of their own sRGB decision.
+static bool VTFFilterForcesSrgb(VTFMipmapFilter filter)
+{
+	return filter == MIPMAP_FILTER_NICE;
+}
+
 // Class construction
 // ------------------
 CVTFFile::CVTFFile()
@@ -596,6 +643,10 @@ vlBool CVTFFile::Create(vlUInt uiWidth, vlUInt uiHeight, vlUInt uiFrames, vlUInt
 				uiNewWidth = VTFCreateOptions.uiResizeWidth;
 				uiNewHeight = VTFCreateOptions.uiResizeHeight;
 				break;
+			case RESIZE_COUNT:
+			default:
+				// Sentinel; no resize requested. Fall through to the size-equality check below.
+				break;
 			}
 
 			// Resize the input.
@@ -687,7 +738,7 @@ vlBool CVTFFile::Create(vlUInt uiWidth, vlUInt uiHeight, vlUInt uiFrames, vlUInt
 							if (!stbir_resize(
 								pSource, this->Header->Width, this->Header->Height, 0,
 								temp.data(), usWidth, usHeight, 0,
-								STBIR_RGBA, VTFCreateOptions.bSRGB ? STBIR_TYPE_UINT8_SRGB : STBIR_TYPE_UINT8, STBIR_EDGE_CLAMP, stbir_filter(VTFCreateOptions.MipmapFilter)))
+								STBIR_RGBA, (VTFCreateOptions.bSRGB || VTFFilterForcesSrgb(VTFCreateOptions.MipmapFilter)) ? STBIR_TYPE_UINT8_SRGB : STBIR_TYPE_UINT8, STBIR_EDGE_CLAMP, VTFFilterToStbirFilter(VTFCreateOptions.MipmapFilter)))
 							{
 								throw 0;
 							}
@@ -974,9 +1025,34 @@ vlBool CVTFFile::Load(IO::Readers::IReader *Reader, vlBool bHeaderOnly)
 			throw 0;
 		}
 
+		// Byte-swapped header detection: PC VTFs are little-endian. Xbox 360 and PS3 VTFs are
+		// big-endian so the u32 version fields come out huge when read on a little-endian host.
+		// Real PC versions are 0..100ish.
+		if(FileHeader.Version[0] > 100u || FileHeader.Version[1] > 100u)
+		{
+			LastError.SetFormatted(
+				"File header looks byte-swapped (version read as %u.%u) — this is likely a console "
+				"VTF (Xbox 360 / PS3). Console VTFs are not supported by this build. "
+				"See docs/roadmap.md for the scope of that work.",
+				FileHeader.Version[0], FileHeader.Version[1]);
+			throw 0;
+		}
+
 		if(FileHeader.Version[0] != VTF_MAJOR_VERSION || (FileHeader.Version[1] < 0 || FileHeader.Version[1] > VTF_MINOR_VERSION))
 		{
-			LastError.SetFormatted("File version %u.%u does not match %d.%d to %d.%d.", FileHeader.Version[0], FileHeader.Version[1], VTF_MAJOR_VERSION, 0, VTF_MAJOR_VERSION, VTF_MINOR_VERSION);
+			// Future-version hint: Strata Source extends beyond v7.5 with compressed-body variants
+			// that are not publicly specified and not yet supported here.
+			if(FileHeader.Version[0] == VTF_MAJOR_VERSION && FileHeader.Version[1] > VTF_MINOR_VERSION)
+			{
+				LastError.SetFormatted(
+					"File is VTF %u.%u; this build supports %d.%d through %d.%d. If this is a Strata "
+					"Source compressed VTF, support is not yet implemented (see docs/roadmap.md).",
+					FileHeader.Version[0], FileHeader.Version[1], VTF_MAJOR_VERSION, 0, VTF_MAJOR_VERSION, VTF_MINOR_VERSION);
+			}
+			else
+			{
+				LastError.SetFormatted("File version %u.%u does not match %d.%d to %d.%d.", FileHeader.Version[0], FileHeader.Version[1], VTF_MAJOR_VERSION, 0, VTF_MAJOR_VERSION, VTF_MINOR_VERSION);
+			}
 			throw 0;
 		}
 
@@ -2098,24 +2174,12 @@ vlBool CVTFFile::GenerateMipmaps(vlUInt uiFace, vlUInt uiFrame, VTFMipmapFilter 
 	if (formatInfo.uiBlueBitsPerPixel > 0) iNumChannels++;
 	if (formatInfo.uiRedBitsPerPixel > 0) iNumChannels++;
 
-	// Determine mip filter
-	stbir_filter iMipFilter;
-	switch(MipmapFilter)
+	stbir_filter iMipFilter = VTFFilterToStbirFilter(MipmapFilter);
+	// NICE forces sRGB-aware downsample when the datatype is UINT8; for FP / UINT16 paths the
+	// datatype is locked by the source pixel format so the override has no effect.
+	if (iDataType == STBIR_TYPE_UINT8 && VTFFilterForcesSrgb(MipmapFilter))
 	{
-	case MIPMAP_FILTER_BOX:
-		iMipFilter = STBIR_FILTER_BOX; break;
-	case MIPMAP_FILTER_TRIANGLE:
-		iMipFilter = STBIR_FILTER_TRIANGLE; break;
-	case MIPMAP_FILTER_CUBIC:
-		iMipFilter = STBIR_FILTER_CUBICBSPLINE; break;
-	case MIPMAP_FILTER_CATROM:
-		iMipFilter = STBIR_FILTER_CATMULLROM; break;
-	case MIPMAP_FILTER_MITCHELL:
-		iMipFilter = STBIR_FILTER_MITCHELL; break;
-	case STBIR_FILTER_POINT_SAMPLE:
-		iMipFilter = STBIR_FILTER_POINT_SAMPLE; break;
-	default:
-		iMipFilter = STBIR_FILTER_DEFAULT; break;
+		iDataType = STBIR_TYPE_UINT8_SRGB;
 	}
 
 	bool bOk = true;
@@ -3079,7 +3143,7 @@ vlBool CVTFFile::CompressDXTn(vlByte *lpSource, vlByte *lpDest, vlUInt uiWidth, 
 
 	CMP_CompressOptions options = {0};
 	options.dwSize        = sizeof(options);
-	options.fquality      = 1.0f;
+	options.fquality      = VTFLib::sDXTQuality;
 	options.dwnumThreads  = 0;
 	if ( DestFormat == IMAGE_FORMAT_DXT1 || DestFormat == IMAGE_FORMAT_DXT1_ONEBITALPHA ) {
 		options.bDXT1UseAlpha = true;
@@ -3710,7 +3774,7 @@ vlBool CVTFFile::Resize(vlByte *lpSourceRGBA8888, vlByte *lpDestRGBA8888, vlUInt
 	if (!stbir_resize(
 		lpSourceRGBA8888, uiSourceWidth, uiSourceHeight, 0,
 		lpDestRGBA8888, uiDestWidth, uiDestHeight, 0,
-		STBIR_RGBA, bSRGB ? STBIR_TYPE_UINT8_SRGB : STBIR_TYPE_UINT8, STBIR_EDGE_CLAMP, stbir_filter(ResizeFilter)))
+		STBIR_RGBA, (bSRGB || VTFFilterForcesSrgb(ResizeFilter)) ? STBIR_TYPE_UINT8_SRGB : STBIR_TYPE_UINT8, STBIR_EDGE_CLAMP, VTFFilterToStbirFilter(ResizeFilter)))
 	{
 		LastError.Set("Error resizing image.");
 		return vlFalse;

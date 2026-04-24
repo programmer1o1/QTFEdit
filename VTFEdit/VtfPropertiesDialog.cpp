@@ -48,6 +48,7 @@ VtfPropertiesDialog::VtfPropertiesDialog(
     vlSingle reflectivityX,
     vlSingle reflectivityY,
     vlSingle reflectivityZ,
+    QString mipQualityText,
     QWidget *parent)
     : QDialog(parent),
       filePath_(std::move(filePath)),
@@ -80,6 +81,14 @@ VtfPropertiesDialog::VtfPropertiesDialog(
 
     lblFormat_ = new QLabel(formatName(format), this);
     summaryLayout->addRow("Format:", lblFormat_);
+
+    if(!mipQualityText.isEmpty()) {
+        lblMipQuality_ = new QLabel(mipQualityText, this);
+        lblMipQuality_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        lblMipQuality_->setWordWrap(true);
+        lblMipQuality_->setToolTip("PSNR of each mip vs. the upscaled next-coarser mip. Higher is better.");
+        summaryLayout->addRow("Mip quality:", lblMipQuality_);
+    }
 
     root->addWidget(summary);
 

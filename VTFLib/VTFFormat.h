@@ -199,6 +199,7 @@ typedef enum tagVTFMipmapFilter
     MIPMAP_FILTER_HAMMING,
     MIPMAP_FILTER_BLACKMAN,
     MIPMAP_FILTER_KAISER,
+    MIPMAP_FILTER_NICE,      //!< Valve-style half-pixel box filter with forced sRGB-aware downsample.
     MIPMAP_FILTER_COUNT
 } VTFMipmapFilter;
 

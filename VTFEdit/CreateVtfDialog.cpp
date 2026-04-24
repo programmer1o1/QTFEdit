@@ -17,6 +17,10 @@
 #include <QVariant>
 #include <QVBoxLayout>
 #include <QSpinBox>
+#include <QHBoxLayout>
+#include <QInputDialog>
+#include <QMessageBox>
+#include <QPushButton>
 
 #include <algorithm>
 
@@ -38,6 +42,7 @@ static void addMipmapFilters(QComboBox *combo) {
     combo->addItem("Hamming", static_cast<int>(MIPMAP_FILTER_HAMMING));
     combo->addItem("Blackman", static_cast<int>(MIPMAP_FILTER_BLACKMAN));
     combo->addItem("Kaiser", static_cast<int>(MIPMAP_FILTER_KAISER));
+    combo->addItem("Nice (sRGB-aware box)", static_cast<int>(MIPMAP_FILTER_NICE));
 }
 
 struct FlagItem {
@@ -68,6 +73,24 @@ CreateVtfDialog::CreateVtfDialog(QWidget *parent) : QDialog(parent) {
     setModal(true);
 
     auto *layout = new QFormLayout(this);
+
+    // Preset bar
+    {
+        auto *row = new QWidget(this);
+        auto *h = new QHBoxLayout(row);
+        h->setContentsMargins(0, 0, 0, 0);
+        presetCombo_ = new QComboBox(row);
+        presetCombo_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        h->addWidget(presetCombo_, 1);
+        auto *saveBtn = new QPushButton("Save As…", row);
+        auto *deleteBtn = new QPushButton("Delete", row);
+        h->addWidget(saveBtn);
+        h->addWidget(deleteBtn);
+        layout->addRow("Preset:", row);
+        connect(presetCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &CreateVtfDialog::onPresetSelected);
+        connect(saveBtn, &QPushButton::clicked, this, &CreateVtfDialog::onSavePresetAs);
+        connect(deleteBtn, &QPushButton::clicked, this, &CreateVtfDialog::onDeletePreset);
+    }
 
     textureType_ = new QComboBox(this);
     textureType_->addItem("Animated Texture", static_cast<int>(TextureType::Animated));
@@ -325,6 +348,161 @@ CreateVtfDialog::CreateVtfDialog(QWidget *parent) : QDialog(parent) {
     connect(buttons_, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(buttons_, &QDialogButtonBox::rejected, this, &QDialog::reject);
     layout->addRow(buttons_);
+
+    rebuildPresetCombo();
+}
+
+void CreateVtfDialog::rebuildPresetCombo(const QString &selectName) {
+    if(!presetCombo_) return;
+    QSignalBlocker b(presetCombo_);
+    presetCombo_->clear();
+    presetCombo_->addItem("— none —");
+    QSettings s;
+    const QStringList names = s.value("presets/export/names").toStringList();
+    for(const auto &n : names) presetCombo_->addItem(n);
+    if(!selectName.isEmpty()) {
+        const int idx = presetCombo_->findText(selectName);
+        if(idx >= 0) presetCombo_->setCurrentIndex(idx);
+    }
+}
+
+void CreateVtfDialog::applyValuesFromPrefix(const QString &prefix) {
+    QSettings s;
+    auto key = [&](const char *name) { return prefix + QLatin1String(name); };
+
+    const int texType = s.value(key("textureType"), static_cast<int>(TextureType::Animated)).toInt();
+    const int normalFmt = s.value(key("normalFormat"), format_->currentData().toInt()).toInt();
+    const int alphaFmt = s.value(key("alphaFormat"),
+                                 static_cast<int>(vtflibCanEncode(IMAGE_FORMAT_DXT5) ? IMAGE_FORMAT_DXT5 : IMAGE_FORMAT_RGBA8888)).toInt();
+    const bool useAlpha = s.value(key("useAlphaFormat"), false).toBool();
+    const int verMinor = s.value(key("versionMinor"), 5).toInt();
+    const bool mip = s.value(key("mipmaps"), true).toBool();
+    const int mipFilter = s.value(key("mipmapFilter"), static_cast<int>(MIPMAP_FILTER_DEFAULT)).toInt();
+    const bool thumb = s.value(key("thumbnail"), thumbnail_->isChecked()).toBool();
+    const bool refl = s.value(key("reflectivity"), true).toBool();
+    const bool sphere = s.value(key("sphereMap"), false).toBool();
+    const bool srgb = s.value(key("srgb"), false).toBool();
+    const bool gammaOn = s.value(key("gammaEnabled"), false).toBool();
+    const double gammaVal = s.value(key("gammaValue"), 2.2).toDouble();
+    const bool resizeEnabled = s.contains(key("resizeEnabled")) ? s.value(key("resizeEnabled")).toBool() : true;
+    const int resizeMethod = resizeEnabled ? s.value(key("resizeMethod"), static_cast<int>(RESIZE_NEAREST_POWER2)).toInt()
+                                           : static_cast<int>(RESIZE_COUNT);
+    const int resizeFilter = s.value(key("resizeFilter"), mipFilter).toInt();
+    const bool clamp = resizeEnabled && s.value(key("resizeClamp"), false).toBool();
+    const int clampW = s.value(key("resizeClampWidth"), 1024).toInt();
+    const int clampH = s.value(key("resizeClampHeight"), 1024).toInt();
+    const int alphaThresh = s.value(key("alphaThreshold"), 0).toInt();
+
+    textureType_->setCurrentIndex(std::clamp(texType, 0, 2));
+    if(const int idx = format_->findData(normalFmt); idx >= 0) format_->setCurrentIndex(idx);
+    if(const int idx = alphaFormat_->findData(alphaFmt); idx >= 0) alphaFormat_->setCurrentIndex(idx);
+    useAlphaFormat_->setChecked(useAlpha);
+    alphaFormat_->setEnabled(useAlpha);
+    versionMinor_->setValue(std::clamp(verMinor, 0, 5));
+    mipmaps_->setChecked(mip);
+    if(const int idx = mipmapFilter_->findData(mipFilter); idx >= 0) mipmapFilter_->setCurrentIndex(idx);
+    if(thumbnail_->isEnabled()) thumbnail_->setChecked(thumb);
+    reflectivity_->setChecked(refl);
+    sphereMap_->setChecked(sphere);
+    srgb_->setChecked(srgb);
+    gammaCorrection_->setChecked(gammaOn);
+    gammaValue_->setValue(std::clamp(gammaVal, 0.1, 5.0));
+    gammaValue_->setEnabled(gammaOn);
+    if(const int idx = resizeMethod_->findData(resizeMethod); idx >= 0) resizeMethod_->setCurrentIndex(idx);
+    if(const int idx = resizeFilter_->findData(resizeFilter); idx >= 0) resizeFilter_->setCurrentIndex(idx);
+    resizeClamp_->setChecked(clamp);
+    resizeClampW_->setValue(std::clamp(clampW, 1, 16384));
+    resizeClampH_->setValue(std::clamp(clampH, 1, 16384));
+    resizeClampW_->setEnabled(clamp);
+    resizeClampH_->setEnabled(clamp);
+    alphaThreshold_->setValue(std::clamp(alphaThresh, 0, 255));
+
+    const QVariant flagsV = s.value(key("flagMask"));
+    if(flagsV.isValid()) {
+        const vlUInt mask = static_cast<vlUInt>(flagsV.toULongLong());
+        for(auto *cb : flagChecks_) {
+            const vlUInt m = static_cast<vlUInt>(cb->property("vtf_flag_mask").toULongLong());
+            cb->setChecked((mask & m) != 0);
+        }
+    }
+}
+
+void CreateVtfDialog::saveValuesToPrefix(const QString &prefix) const {
+    QSettings s;
+    auto key = [&](const char *name) { return prefix + QLatin1String(name); };
+
+    s.setValue(key("textureType"), textureType_->currentData().toInt());
+    s.setValue(key("normalFormat"), format_->currentData().toInt());
+    s.setValue(key("alphaFormat"), alphaFormat_->currentData().toInt());
+    s.setValue(key("useAlphaFormat"), useAlphaFormat_->isChecked());
+    s.setValue(key("versionMinor"), versionMinor_->value());
+    s.setValue(key("mipmaps"), mipmaps_->isChecked());
+    s.setValue(key("mipmapFilter"), mipmapFilter_->currentData().toInt());
+    s.setValue(key("thumbnail"), thumbnail_->isChecked());
+    s.setValue(key("reflectivity"), reflectivity_->isChecked());
+    s.setValue(key("sphereMap"), sphereMap_->isChecked());
+    s.setValue(key("srgb"), srgb_->isChecked());
+    s.setValue(key("gammaEnabled"), gammaCorrection_->isChecked());
+    s.setValue(key("gammaValue"), gammaValue_->value());
+    const int rm = resizeMethod_->currentData().toInt();
+    s.setValue(key("resizeEnabled"), rm != static_cast<int>(RESIZE_COUNT));
+    s.setValue(key("resizeMethod"), rm);
+    s.setValue(key("resizeFilter"), resizeFilter_->currentData().toInt());
+    s.setValue(key("resizeClamp"), resizeClamp_->isChecked());
+    s.setValue(key("resizeClampWidth"), resizeClampW_->value());
+    s.setValue(key("resizeClampHeight"), resizeClampH_->value());
+    s.setValue(key("alphaThreshold"), alphaThreshold_->value());
+
+    vlUInt mask = 0;
+    for(const auto *cb : flagChecks_) {
+        if(cb->isChecked()) {
+            mask |= static_cast<vlUInt>(cb->property("vtf_flag_mask").toULongLong());
+        }
+    }
+    s.setValue(key("flagMask"), static_cast<qulonglong>(mask));
+}
+
+void CreateVtfDialog::onPresetSelected(int index) {
+    if(index <= 0) return;
+    const QString name = presetCombo_->itemText(index);
+    if(name.isEmpty()) return;
+    applyValuesFromPrefix(QString("presets/export/%1/").arg(name));
+}
+
+void CreateVtfDialog::onSavePresetAs() {
+    bool ok = false;
+    const QString name = QInputDialog::getText(this, "Save Preset",
+                                               "Preset name:",
+                                               QLineEdit::Normal, {}, &ok).trimmed();
+    if(!ok || name.isEmpty()) return;
+    if(name.contains('/') || name.contains('\\')) {
+        QMessageBox::warning(this, "Invalid name", "Preset name cannot contain slashes.");
+        return;
+    }
+
+    saveValuesToPrefix(QString("presets/export/%1/").arg(name));
+    QSettings s;
+    QStringList names = s.value("presets/export/names").toStringList();
+    if(!names.contains(name)) {
+        names.push_back(name);
+        names.sort(Qt::CaseInsensitive);
+        s.setValue("presets/export/names", names);
+    }
+    rebuildPresetCombo(name);
+}
+
+void CreateVtfDialog::onDeletePreset() {
+    if(!presetCombo_ || presetCombo_->currentIndex() <= 0) return;
+    const QString name = presetCombo_->currentText();
+    if(QMessageBox::question(this, "Delete preset",
+                             QString("Delete preset \"%1\"?").arg(name)) != QMessageBox::Yes) return;
+
+    QSettings s;
+    s.remove(QString("presets/export/%1").arg(name));
+    QStringList names = s.value("presets/export/names").toStringList();
+    names.removeAll(name);
+    s.setValue("presets/export/names", names);
+    rebuildPresetCombo();
 }
 
 CreateVtfDialog::~CreateVtfDialog() = default;

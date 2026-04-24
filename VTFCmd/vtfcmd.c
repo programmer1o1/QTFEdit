@@ -21,11 +21,48 @@
 #include "enumerations.h"
 #include "image_io.h"
 
+#include <signal.h>
+#include <sys/stat.h>
+#include <time.h>
+
 #ifndef _WIN32
 #include <dirent.h>
-#include <sys/stat.h>
 #include <fnmatch.h>
+#include <unistd.h>
 #endif
+
+static volatile sig_atomic_t g_bInterrupted = 0;
+
+static void SignalHandler(int sig)
+{
+	(void)sig;
+	g_bInterrupted = 1;
+}
+
+// Cross-platform file modification time helper.
+static time_t GetFileModTime(const vlChar *lpPath)
+{
+#ifdef _WIN32
+	struct _stat st;
+	if(_stat(lpPath, &st) == 0)
+		return st.st_mtime;
+	return 0;
+#else
+	struct stat st;
+	if(stat(lpPath, &st) == 0)
+		return st.st_mtime;
+	return 0;
+#endif
+}
+
+static void SleepSeconds(vlUInt uiSeconds)
+{
+#ifdef _WIN32
+	Sleep(uiSeconds * 1000);
+#else
+	sleep(uiSeconds);
+#endif
+}
 
 #ifndef _WIN32
 static int fnmatch_case_insensitive(const char *pattern, const char *name)
@@ -83,6 +120,7 @@ vlUInt uiCompleted = 0;								// Files processed without error.
 vlChar *lpPrefix = "";								// String to add to start of output file name.
 vlChar *lpPostfix = "";								// String to add to end of output file name.
 vlChar *lpOutput = 0;								// Output folder.
+vlChar *lpExportPath = 0;							// Explicit full output file path for exports (overrides -output + name derivation).
 
 vlBool bSilent = vlFalse;							// Don't display output.
 vlBool bPause = vlFalse;							// Don't pause the console.
@@ -100,6 +138,15 @@ vlChar *lpParameters[MAX_ITEMS][2];					// VMT parameters.
 vlChar *lpExportFormat = "tga";						// Format extension for exporting VTF images.
 
 vlBool bHdr = vlFalse;
+vlSingle sDXTQuality = -1.0f;						// DXT compression quality (0.0-1.0), -1 = use VTFLib default.
+
+vlBool bExtractAllMips = vlFalse;					// Extract all mipmap levels.
+vlBool bExtractAllFrames = vlFalse;					// Extract all frames.
+vlBool bExtractAllFaces = vlFalse;					// Extract all faces.
+vlBool bExtractAllSlices = vlFalse;					// Extract all slices.
+
+vlBool bWatch = vlFalse;							// Watch files for changes and re-process.
+vlUInt uiWatchInterval = 1;							// Watch poll interval in seconds.
 
 void Pause();
 void Print(const vlChar *lpFormat, ...);
@@ -277,6 +324,18 @@ int main(int argc, char* argv[])
 				else
 				{
 					PrintUsage("-output expects string argument.");
+					return 2;
+				}
+			}
+			else if(stricmp(argv[i], "-exportpath") == 0)
+			{
+				if(i + 1 < argc)
+				{
+					lpExportPath = argv[++i];
+				}
+				else
+				{
+					PrintUsage("-exportpath expects string argument.");
 					return 2;
 				}
 			}
@@ -619,6 +678,95 @@ int main(int argc, char* argv[])
 					return 2;
 				}
 			}
+			else if(stricmp(argv[i], "-quality") == 0 || stricmp(argv[i], "--quality") == 0)
+			{
+				if(i + 1 < argc && sscanf(argv[++i], "%f", &sTemp) == 1)
+				{
+					sDXTQuality = sTemp;
+				}
+				else
+				{
+					PrintUsage("-quality expects a float argument (0.0 to 1.0).");
+					return 2;
+				}
+			}
+			else if(stricmp(argv[i], "-watch") == 0 || stricmp(argv[i], "--watch") == 0)
+			{
+				bWatch = vlTrue;
+			}
+			else if(stricmp(argv[i], "-extract-all-mips") == 0 || stricmp(argv[i], "--extract-all-mips") == 0)
+			{
+				bExtractAllMips = vlTrue;
+			}
+			else if(stricmp(argv[i], "-extract-all-frames") == 0 || stricmp(argv[i], "--extract-all-frames") == 0)
+			{
+				bExtractAllFrames = vlTrue;
+			}
+			else if(stricmp(argv[i], "-extract-all-faces") == 0 || stricmp(argv[i], "--extract-all-faces") == 0)
+			{
+				bExtractAllFaces = vlTrue;
+			}
+			else if(stricmp(argv[i], "-extract-all-slices") == 0 || stricmp(argv[i], "--extract-all-slices") == 0)
+			{
+				bExtractAllSlices = vlTrue;
+			}
+			else if(stricmp(argv[i], "-extract-all") == 0 || stricmp(argv[i], "--extract-all") == 0)
+			{
+				bExtractAllMips = vlTrue;
+				bExtractAllFrames = vlTrue;
+				bExtractAllFaces = vlTrue;
+				bExtractAllSlices = vlTrue;
+			}
+			// vtex2-compatible shorthand flag aliases.
+			else if(stricmp(argv[i], "-pointsample") == 0 || stricmp(argv[i], "--pointsample") == 0)
+			{
+				CreateOptions.uiFlags |= TEXTUREFLAGS_POINTSAMPLE;
+			}
+			else if(stricmp(argv[i], "-trilinear") == 0 || stricmp(argv[i], "--trilinear") == 0)
+			{
+				CreateOptions.uiFlags |= TEXTUREFLAGS_TRILINEAR;
+			}
+			else if(stricmp(argv[i], "-clamps") == 0 || stricmp(argv[i], "--clamps") == 0)
+			{
+				CreateOptions.uiFlags |= TEXTUREFLAGS_CLAMPS;
+			}
+			else if(stricmp(argv[i], "-clampt") == 0 || stricmp(argv[i], "--clampt") == 0)
+			{
+				CreateOptions.uiFlags |= TEXTUREFLAGS_CLAMPT;
+			}
+			else if(stricmp(argv[i], "-clampu") == 0 || stricmp(argv[i], "--clampu") == 0)
+			{
+				CreateOptions.uiFlags |= TEXTUREFLAGS_CLAMPU;
+			}
+			else if(stricmp(argv[i], "-anisotropic") == 0 || stricmp(argv[i], "--anisotropic") == 0)
+			{
+				CreateOptions.uiFlags |= TEXTUREFLAGS_ANISOTROPIC;
+			}
+			else if(stricmp(argv[i], "-normal") == 0 || stricmp(argv[i], "--normal") == 0)
+			{
+				CreateOptions.uiFlags |= TEXTUREFLAGS_NORMAL;
+			}
+			else if(stricmp(argv[i], "-nomip") == 0 || stricmp(argv[i], "--nomip") == 0)
+			{
+				CreateOptions.uiFlags |= TEXTUREFLAGS_NOMIP;
+				CreateOptions.bMipmaps = vlFalse;
+			}
+			else if(stricmp(argv[i], "-nolod") == 0 || stricmp(argv[i], "--nolod") == 0)
+			{
+				CreateOptions.uiFlags |= TEXTUREFLAGS_NOLOD;
+			}
+			else if(stricmp(argv[i], "-ssbump") == 0 || stricmp(argv[i], "--ssbump") == 0)
+			{
+				CreateOptions.uiFlags |= TEXTUREFLAGS_SSBUMP;
+			}
+			else if(stricmp(argv[i], "-hint_dxt5") == 0 || stricmp(argv[i], "--hint_dxt5") == 0)
+			{
+				CreateOptions.uiFlags |= TEXTUREFLAGS_HINT_DXT5;
+			}
+			else if(stricmp(argv[i], "-border") == 0 || stricmp(argv[i], "--border") == 0)
+			{
+				CreateOptions.uiFlags |= TEXTUREFLAGS_BORDER;
+			}
 			else
 			{
 				PrintUsage("Unknown argument: %s.", argv[i]);
@@ -644,6 +792,12 @@ int main(int argc, char* argv[])
 
 	// Initialize VTFLib.
 	vlInitialize();
+
+	// Apply DXT compression quality if specified.
+	if(sDXTQuality >= 0.0f)
+	{
+		vlSetFloat(VTFLIB_DXT_QUALITY, sDXTQuality);
+	}
 
 	vlCreateImage(&uiVTFImage);
 	vlBindImage(uiVTFImage);
@@ -694,6 +848,48 @@ int main(int argc, char* argv[])
 		}
 
 		ProcessFolder(lpFolders[i], lpWildcard);
+	}
+
+	// Watch mode: re-process files when they change.
+	if(bWatch && uiFileCount > 0)
+	{
+		signal(SIGINT, SignalHandler);
+#ifndef _WIN32
+		signal(SIGTERM, SignalHandler);
+#endif
+
+		Print("Watching %u file(s) for changes. Press Ctrl+C to stop.\n", uiFileCount);
+
+		// Store initial modification times.
+		time_t *lpModTimes = (time_t *)calloc(uiFileCount, sizeof(time_t));
+		if(lpModTimes != NULL)
+		{
+			for(i = 0; i < (int)uiFileCount; i++)
+			{
+				lpModTimes[i] = GetFileModTime(lpFiles[i]);
+			}
+
+			while(!g_bInterrupted)
+			{
+				SleepSeconds(uiWatchInterval);
+				if(g_bInterrupted) break;
+
+				for(i = 0; i < (int)uiFileCount; i++)
+				{
+					time_t modTime = GetFileModTime(lpFiles[i]);
+					if(modTime != 0 && modTime != lpModTimes[i])
+					{
+						lpModTimes[i] = modTime;
+						Print("\nFile changed: %s\n", lpFiles[i]);
+						ProcessFile(lpFiles[i]);
+					}
+				}
+			}
+
+			free(lpModTimes);
+		}
+
+		Print("\nWatch mode stopped.\n");
 	}
 
 	// Shutdown DevIL.
@@ -755,6 +951,7 @@ void PrintUsage(const vlChar *lpError, ...)
 	Print(" -file <path>              (Input file path.)\n");
 	Print(" -folder <path>            (Input directory search string.)\n");
 	Print(" -output <path>            (Output directory.)\n");
+	Print(" -exportpath <file>        (Exact output file path for a single-image export; used by shell thumbnailers.)\n");
 	Print(" -prefix <string>          (Output file prefix.)\n");
 	Print(" -postfix <string>         (Output file postfix.)\n");
 	Print(" -version <string>         (Output version.)\n");
@@ -770,6 +967,13 @@ void PrintUsage(const vlChar *lpError, ...)
 	Print(" -rclampwidth <integer>    (Maximum width to resize to.)\n");
 	Print(" -rclampheight <integer>   (Maximum height to resize to.)\n");
 	Print(" -alphathreshold <integer> (Alpha threshold for One Bit Alpha. Pixel alpha below this value is set to 0)\n");
+	Print(" -quality <single>         (DXT/BCn compression quality, 0.0 to 1.0. Default: 1.0.)\n");
+	Print(" -extract-all-mips        (Export all mipmap levels from VTF files.)\n");
+	Print(" -extract-all-frames      (Export all frames from VTF files.)\n");
+	Print(" -extract-all-faces       (Export all faces from VTF files.)\n");
+	Print(" -extract-all-slices      (Export all slices from VTF files.)\n");
+	Print(" -extract-all             (Export all mips, frames, faces, and slices.)\n");
+	Print(" -watch                    (Watch input files and re-process on change.)\n");
 	Print(" -gamma                    (Gamma correct image.)\n");
 	Print(" -gcorrection <single>     (Gamma correction to use.)\n");
 	Print(" -nomipmaps                (Don't generate mipmaps.)\n");
@@ -780,11 +984,25 @@ void PrintUsage(const vlChar *lpError, ...)
 	Print(" -shader <string>          (Create a material for the texture.)\n");
 	Print(" -param <string> <string>  (Add a parameter to the material.)\n");
 	Print(" -recurse                  (Process directories recursively.)\n");
-	Print(" -exportformat <string>    (Convert VTF files to this extension. stb: png/tga/bmp/jpg/hdr; DevIL: DevIL-supported.)\n");
+	Print(" -exportformat <string>    (Convert VTF files to this extension. stb: png/tga/bmp/jpg/hdr/qoi/exr; DevIL: DevIL-supported + qoi/exr.)\n");
 	Print(" -silent                   (Silent mode.)\n");
 	Print(" -pause                    (Pause when done.)\n");
 	Print(" -hdr                      (Indicate input is hdr.)\n");
 	Print(" -help                     (Display vtfcmd help.)\n");
+	Print("\n");
+	Print("Flag shortcuts (vtex2-compatible):\n");
+	Print(" -pointsample              (Set POINTSAMPLE flag.)\n");
+	Print(" -trilinear                (Set TRILINEAR flag.)\n");
+	Print(" -clamps                   (Set CLAMPS flag.)\n");
+	Print(" -clampt                   (Set CLAMPT flag.)\n");
+	Print(" -clampu                   (Set CLAMPU flag.)\n");
+	Print(" -anisotropic              (Set ANISOTROPIC flag.)\n");
+	Print(" -normal                   (Set NORMAL flag.)\n");
+	Print(" -nomip                    (Set NOMIP flag and disable mipmap generation.)\n");
+	Print(" -nolod                    (Set NOLOD flag.)\n");
+	Print(" -ssbump                   (Set SSBUMP flag.)\n");
+	Print(" -hint_dxt5                (Set HINT_DXT5 flag.)\n");
+	Print(" -border                   (Set BORDER flag.)\n");
 	Print("\n");
 	Print("Example vtfcmd usage:\n");
 	Print("vtfcmd.exe -file \"C:\\texture1.bmp\" -file \"C:\\texture2.bmp\" -format \"dxt1\"\n");
@@ -896,6 +1114,28 @@ void CreateOutputPath(vlChar *lpOutputFile, vlChar *lpInputFile, vlChar *lpExten
 	// Add the extension to the file name.
 	strcat(lpOutputFile, ".");
 	strcat(lpOutputFile, lpExtension);
+}
+
+//
+// CreateOutputPathWithSuffix()
+// Create an output file path with an optional suffix before the extension.
+//
+void CreateOutputPathWithSuffix(vlChar *lpOutputFile, vlChar *lpInputFile, vlChar *lpExtension, const vlChar *lpSuffix)
+{
+	CreateOutputPath(lpOutputFile, lpInputFile, lpExtension);
+
+	if(lpSuffix != NULL && *lpSuffix != '\0')
+	{
+		// Insert suffix before the extension.
+		vlChar *lpDot = strrchr(lpOutputFile, '.');
+		if(lpDot != NULL)
+		{
+			vlChar lpExt[64];
+			strcpy(lpExt, lpDot);
+			strcpy(lpDot, lpSuffix);
+			strcat(lpOutputFile, lpExt);
+		}
+	}
 }
 
 //
@@ -1075,12 +1315,17 @@ void ProcessFile(vlChar *lpInputFile)
 		Print("  Format: %s\n\n", vlImageGetImageFormatInfo(SourceFormat)->lpName);
 		Print("  Resources: %u\n", vlImageGetResourceCount());
 
-		Print(" Creating texture:\n");
+		Print(" Exporting texture:\n");
 
 		// Figure out which destination format to use.
 		DestFormat = (vlImageGetFlags() & (TEXTUREFLAGS_ONEBITALPHA | TEXTUREFLAGS_EIGHTBITALPHA)) ? IMAGE_FORMAT_RGBA8888 : IMAGE_FORMAT_RGB888;
 
-		// Alocate the required memory to convert the vtf to.
+		vlUInt uiFrameCount = bExtractAllFrames ? vlImageGetFrameCount() : 1;
+		vlUInt uiFaceCount  = bExtractAllFaces  ? vlImageGetFaceCount()  : 1;
+		vlUInt uiSliceCount = bExtractAllSlices  ? vlImageGetDepth()      : 1;
+		vlUInt uiMipCount   = bExtractAllMips    ? vlImageGetMipmapCount(): 1;
+
+		// Allocate buffer for the largest mip (mip 0).
 		lpImageData = malloc(vlImageComputeImageSize(vlImageGetWidth(), vlImageGetHeight(), 1, 1, DestFormat));
 
 		if(lpImageData == 0)
@@ -1089,30 +1334,65 @@ void ProcessFile(vlChar *lpInputFile)
 			return;
 		}
 
-		// Convert the .vtf.
-		if(!vlImageConvert(vlImageGetData(0, 0, 0, 0), lpImageData, vlImageGetWidth(), vlImageGetHeight(), SourceFormat, DestFormat))
-		{
-			free(lpImageData);
-
-			Print(" Error converting input file:\n%s\n\n", vlGetLastError());
-			return;
-		}
-
-		CreateOutputPath(lpExportFile, lpInputFile, lpExportFormat);
-
 		vlChar lpImageIOError[256];
 
-		// Write export file.
-		Print("  Writing %s...\n", lpExportFile);
-		if(!vtfcmdWriteImage(lpExportFile, lpImageData, vlImageGetWidth(), vlImageGetHeight(), DestFormat == IMAGE_FORMAT_RGBA8888 ? 4 : 3, lpImageIOError, sizeof(lpImageIOError)))
+		for(vlUInt frame = 0; frame < uiFrameCount; frame++)
+		for(vlUInt face = 0; face < uiFaceCount; face++)
+		for(vlUInt slice = 0; slice < uiSliceCount; slice++)
+		for(vlUInt mip = 0; mip < uiMipCount; mip++)
 		{
-			free(lpImageData);
-			Print(" Error creating %s file: %s\n\n", lpExportFormat, lpImageIOError);
-			return;
+			vlUInt uiMipWidth, uiMipHeight, uiMipDepth;
+			vlImageComputeMipmapDimensions(vlImageGetWidth(), vlImageGetHeight(), vlImageGetDepth(), mip, &uiMipWidth, &uiMipHeight, &uiMipDepth);
+
+			vlByte *lpSrcData = vlImageGetData(frame, face, slice, mip);
+			if(lpSrcData == NULL)
+			{
+				Print("  Warning: No data for frame %u, face %u, slice %u, mip %u.\n", frame, face, slice, mip);
+				continue;
+			}
+
+			if(!vlImageConvert(lpSrcData, lpImageData, uiMipWidth, uiMipHeight, SourceFormat, DestFormat))
+			{
+				Print("  Error converting frame %u, face %u, slice %u, mip %u:\n%s\n", frame, face, slice, mip, vlGetLastError());
+				continue;
+			}
+
+			// Build suffix string for multi-extraction.
+			vlChar lpSuffix[128] = "";
+			vlBool bAnyExtract = bExtractAllFrames || bExtractAllFaces || bExtractAllSlices || bExtractAllMips;
+			if(bAnyExtract)
+			{
+				vlChar lpTemp2[128] = "";
+				if(bExtractAllFrames) { sprintf(lpTemp2, "_frame%u", frame); strcat(lpSuffix, lpTemp2); }
+				if(bExtractAllFaces)  { sprintf(lpTemp2, "_face%u", face);   strcat(lpSuffix, lpTemp2); }
+				if(bExtractAllSlices) { sprintf(lpTemp2, "_slice%u", slice); strcat(lpSuffix, lpTemp2); }
+				if(bExtractAllMips)   { sprintf(lpTemp2, "_mip%u", mip);     strcat(lpSuffix, lpTemp2); }
+			}
+
+			if(lpExportPath != 0 && *lpExportPath != '\0' && !bAnyExtract)
+			{
+				// Explicit single-output path (e.g. for Linux freedesktop thumbnailers that pass %o).
+				// Only honored when exporting a single frame/face/slice/mip — with -extract-all-* we
+				// would overwrite the same file N times.
+				strncpy(lpExportFile, lpExportPath, sizeof(lpExportFile) - 1);
+				lpExportFile[sizeof(lpExportFile) - 1] = '\0';
+			}
+			else
+			{
+				CreateOutputPathWithSuffix(lpExportFile, lpInputFile, lpExportFormat, lpSuffix);
+			}
+
+			Print("  Writing %s...\n", lpExportFile);
+			if(!vtfcmdWriteImage(lpExportFile, lpImageData, uiMipWidth, uiMipHeight, DestFormat == IMAGE_FORMAT_RGBA8888 ? 4 : 3, lpImageIOError, sizeof(lpImageIOError)))
+			{
+				Print("  Error creating %s file: %s\n", lpExportFormat, lpImageIOError);
+				continue;
+			}
+
+			Print("  %s written.\n", lpExportFile);
 		}
 
 		free(lpImageData);
-		Print("  %s written.\n\n", lpExportFile);
 	}
 
 	Print("%s processed.\n\n", lpInputFile);

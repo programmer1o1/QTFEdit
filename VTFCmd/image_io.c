@@ -23,6 +23,283 @@
 #define VTFCMD_USE_DEVIL 1
 #endif
 
+// QOI and EXR are always available (header-only, no external dependency).
+#define QOI_IMPLEMENTATION
+#include "qoi.h"
+
+#include "tinyexr_wrapper.h"
+
+#ifndef VTFCMD_HAS_WEBP
+#define VTFCMD_HAS_WEBP 0
+#endif
+
+#if VTFCMD_HAS_WEBP
+#include <webp/encode.h>
+#include <webp/decode.h>
+#endif
+
+// Shared helpers used by both backends.
+static vlBool ext_equals_shared(const char *lpExt, const char *lpWant)
+{
+	while(*lpExt == '.')
+		lpExt++;
+
+	while(*lpExt && *lpWant)
+	{
+		char a = (char)tolower((unsigned char)*lpExt++);
+		char b = (char)tolower((unsigned char)*lpWant++);
+		if(a != b)
+			return vlFalse;
+	}
+
+	return *lpExt == '\0' && *lpWant == '\0';
+}
+
+static const char *find_extension_shared(const char *lpPath)
+{
+	const char *dot = strrchr(lpPath, '.');
+	if(dot == NULL || dot[1] == '\0')
+		return "";
+	return dot + 1;
+}
+
+static vlBool vtfcmdWriteQOI(const vlChar *lpPath, const vlByte *lpData, vlUInt uiWidth, vlUInt uiHeight, vlUInt uiChannels, vlChar *lpError, vlUInt uiErrorSize)
+{
+	qoi_desc desc;
+	desc.width = uiWidth;
+	desc.height = uiHeight;
+	desc.channels = uiChannels;
+	desc.colorspace = QOI_SRGB;
+
+	int written = qoi_write(lpPath, lpData, &desc);
+	if(!written)
+	{
+		if(lpError && uiErrorSize > 0) snprintf(lpError, uiErrorSize, "qoi_write() failed.");
+		return vlFalse;
+	}
+
+	if(lpError) *lpError = '\0';
+	return vlTrue;
+}
+
+static vlBool vtfcmdWriteEXR(const vlChar *lpPath, const vlByte *lpData, vlUInt uiWidth, vlUInt uiHeight, vlUInt uiChannels, vlChar *lpError, vlUInt uiErrorSize)
+{
+	if(uiChannels < 3)
+	{
+		if(lpError && uiErrorSize > 0) snprintf(lpError, uiErrorSize, ".exr export requires at least 3 channels.");
+		return vlFalse;
+	}
+
+	// Convert byte data to float RGBA for tinyexr.
+	vlUInt numChannels = uiChannels >= 4 ? 4 : 3;
+	float *pixelsf = (float *)malloc((size_t)uiWidth * (size_t)uiHeight * numChannels * sizeof(float));
+	if(pixelsf == NULL)
+	{
+		if(lpError && uiErrorSize > 0) snprintf(lpError, uiErrorSize, "malloc() failed.");
+		return vlFalse;
+	}
+
+	for(size_t i = 0; i < (size_t)uiWidth * (size_t)uiHeight; i++)
+	{
+		for(vlUInt c = 0; c < numChannels; c++)
+		{
+			pixelsf[i * numChannels + c] = lpData[i * uiChannels + c] / 255.0f;
+		}
+	}
+
+	const char *exrErr = NULL;
+	int ret = vtfcmd_SaveEXR(pixelsf, (int)uiWidth, (int)uiHeight, (int)numChannels, 0, lpPath, &exrErr);
+	free(pixelsf);
+
+	if(ret != VTFCMD_TINYEXR_SUCCESS)
+	{
+		if(lpError && uiErrorSize > 0)
+		{
+			if(exrErr)
+				snprintf(lpError, uiErrorSize, "tinyexr: %s", exrErr);
+			else
+				snprintf(lpError, uiErrorSize, "tinyexr failed with code %d.", ret);
+		}
+		vtfcmd_FreeEXRErrorMessage(exrErr);
+		return vlFalse;
+	}
+
+	if(lpError) *lpError = '\0';
+	return vlTrue;
+}
+
+static vlBool vtfcmdLoadQOI(const vlChar *lpPath, VTFCmdLoadedImage *pOut, vlChar *lpError, vlUInt uiErrorSize)
+{
+	qoi_desc desc;
+	void *pixels = qoi_read(lpPath, &desc, 4);
+	if(pixels == NULL)
+	{
+		if(lpError && uiErrorSize > 0) snprintf(lpError, uiErrorSize, "qoi_read() failed.");
+		return vlFalse;
+	}
+
+	pOut->uiWidth = desc.width;
+	pOut->uiHeight = desc.height;
+	pOut->uiChannelsInFile = desc.channels;
+	if(pOut->uiChannelsInFile < 1) pOut->uiChannelsInFile = 1;
+	if(pOut->uiChannelsInFile > 4) pOut->uiChannelsInFile = 4;
+	pOut->lpRGBA = (vlByte *)pixels;
+
+	if(lpError) *lpError = '\0';
+	return vlTrue;
+}
+
+static vlBool vtfcmdvtfcmd_LoadEXR(const vlChar *lpPath, VTFCmdLoadedImage *pOut, vlChar *lpError, vlUInt uiErrorSize)
+{
+	float *pixelsf = NULL;
+	int w = 0, h = 0;
+	const char *exrErr = NULL;
+
+	int ret = vtfcmd_LoadEXR(&pixelsf, &w, &h, lpPath, &exrErr);
+	if(ret != VTFCMD_TINYEXR_SUCCESS)
+	{
+		if(lpError && uiErrorSize > 0)
+		{
+			if(exrErr)
+				snprintf(lpError, uiErrorSize, "tinyexr: %s", exrErr);
+			else
+				snprintf(lpError, uiErrorSize, "tinyexr failed with code %d.", ret);
+		}
+		vtfcmd_FreeEXRErrorMessage(exrErr);
+		return vlFalse;
+	}
+
+	// Convert float RGBA to byte RGBA.
+	vlByte *pixels8 = (vlByte *)malloc((size_t)w * (size_t)h * 4);
+	if(pixels8 == NULL)
+	{
+		free(pixelsf);
+		if(lpError && uiErrorSize > 0) snprintf(lpError, uiErrorSize, "malloc() failed.");
+		return vlFalse;
+	}
+
+	for(size_t i = 0; i < (size_t)w * (size_t)h * 4; i++)
+	{
+		float v = pixelsf[i];
+		if(v < 0.0f) v = 0.0f;
+		if(v > 1.0f) v = 1.0f;
+		pixels8[i] = (vlByte)(v * 255.0f + 0.5f);
+	}
+
+	free(pixelsf);
+
+	pOut->uiWidth = (vlUInt)w;
+	pOut->uiHeight = (vlUInt)h;
+	pOut->uiChannelsInFile = 4;
+	pOut->lpRGBA = pixels8;
+
+	if(lpError) *lpError = '\0';
+	return vlTrue;
+}
+
+#if VTFCMD_HAS_WEBP
+static vlBool vtfcmdWriteWebP(const vlChar *lpPath, const vlByte *lpData, vlUInt uiWidth, vlUInt uiHeight, vlUInt uiChannels, vlChar *lpError, vlUInt uiErrorSize)
+{
+	uint8_t *output = NULL;
+	size_t outputSize = 0;
+
+	if(uiChannels == 4)
+		outputSize = WebPEncodeLosslessRGBA(lpData, (int)uiWidth, (int)uiHeight, (int)(uiWidth * 4), &output);
+	else
+		outputSize = WebPEncodeLosslessRGB(lpData, (int)uiWidth, (int)uiHeight, (int)(uiWidth * 3), &output);
+
+	if(outputSize == 0 || output == NULL)
+	{
+		if(lpError && uiErrorSize > 0) snprintf(lpError, uiErrorSize, "WebP encoding failed.");
+		WebPFree(output);
+		return vlFalse;
+	}
+
+	FILE *f = fopen(lpPath, "wb");
+	if(f == NULL)
+	{
+		WebPFree(output);
+		if(lpError && uiErrorSize > 0) snprintf(lpError, uiErrorSize, "Failed to open '%s' for writing.", lpPath);
+		return vlFalse;
+	}
+
+	size_t written = fwrite(output, 1, outputSize, f);
+	fclose(f);
+	WebPFree(output);
+
+	if(written != outputSize)
+	{
+		if(lpError && uiErrorSize > 0) snprintf(lpError, uiErrorSize, "Failed to write WebP data.");
+		return vlFalse;
+	}
+
+	if(lpError) *lpError = '\0';
+	return vlTrue;
+}
+
+static vlBool vtfcmdLoadWebP(const vlChar *lpPath, VTFCmdLoadedImage *pOut, vlChar *lpError, vlUInt uiErrorSize)
+{
+	FILE *f = fopen(lpPath, "rb");
+	if(f == NULL)
+	{
+		if(lpError && uiErrorSize > 0) snprintf(lpError, uiErrorSize, "Failed to open '%s' for reading.", lpPath);
+		return vlFalse;
+	}
+
+	fseek(f, 0, SEEK_END);
+	long fileSize = ftell(f);
+	fseek(f, 0, SEEK_SET);
+
+	if(fileSize <= 0)
+	{
+		fclose(f);
+		if(lpError && uiErrorSize > 0) snprintf(lpError, uiErrorSize, "Empty or invalid WebP file.");
+		return vlFalse;
+	}
+
+	uint8_t *fileData = (uint8_t *)malloc((size_t)fileSize);
+	if(fileData == NULL)
+	{
+		fclose(f);
+		if(lpError && uiErrorSize > 0) snprintf(lpError, uiErrorSize, "malloc() failed.");
+		return vlFalse;
+	}
+
+	fread(fileData, 1, (size_t)fileSize, f);
+	fclose(f);
+
+	int w = 0, h = 0;
+	uint8_t *pixels = WebPDecodeRGBA(fileData, (size_t)fileSize, &w, &h);
+	free(fileData);
+
+	if(pixels == NULL)
+	{
+		if(lpError && uiErrorSize > 0) snprintf(lpError, uiErrorSize, "WebP decoding failed.");
+		return vlFalse;
+	}
+
+	// Copy to our own buffer since WebP uses its own allocator.
+	vlByte *lpRGBA = (vlByte *)malloc((size_t)w * (size_t)h * 4);
+	if(lpRGBA == NULL)
+	{
+		WebPFree(pixels);
+		if(lpError && uiErrorSize > 0) snprintf(lpError, uiErrorSize, "malloc() failed.");
+		return vlFalse;
+	}
+
+	memcpy(lpRGBA, pixels, (size_t)w * (size_t)h * 4);
+	WebPFree(pixels);
+
+	pOut->uiWidth = (vlUInt)w;
+	pOut->uiHeight = (vlUInt)h;
+	pOut->uiChannelsInFile = 4;
+	pOut->lpRGBA = lpRGBA;
+
+	if(lpError) *lpError = '\0';
+	return vlTrue;
+}
+#endif
+
 #if VTFCMD_USE_DEVIL
 
 static ILuint g_DevILImage = 0;
@@ -69,6 +346,17 @@ vlBool vtfcmdLoadImageRGBA(const vlChar *lpPath, VTFCmdLoadedImage *pOut, vlChar
 		return vlFalse;
 
 	memset(pOut, 0, sizeof(*pOut));
+
+	// Handle formats not supported by DevIL natively.
+	const char *ext = find_extension_shared(lpPath);
+	if(ext_equals_shared(ext, "qoi"))
+		return vtfcmdLoadQOI(lpPath, pOut, lpError, uiErrorSize);
+	if(ext_equals_shared(ext, "exr"))
+		return vtfcmdvtfcmd_LoadEXR(lpPath, pOut, lpError, uiErrorSize);
+#if VTFCMD_HAS_WEBP
+	if(ext_equals_shared(ext, "webp"))
+		return vtfcmdLoadWebP(lpPath, pOut, lpError, uiErrorSize);
+#endif
 
 	if(!ilLoadImage(lpPath))
 	{
@@ -118,6 +406,17 @@ vlBool vtfcmdWriteImage(const vlChar *lpPath, const vlByte *lpData, vlUInt uiWid
 		return vlFalse;
 	}
 
+	// Handle formats not supported by DevIL natively.
+	const char *ext = find_extension_shared(lpPath);
+	if(ext_equals_shared(ext, "qoi"))
+		return vtfcmdWriteQOI(lpPath, lpData, uiWidth, uiHeight, uiChannels, lpError, uiErrorSize);
+	if(ext_equals_shared(ext, "exr"))
+		return vtfcmdWriteEXR(lpPath, lpData, uiWidth, uiHeight, uiChannels, lpError, uiErrorSize);
+#if VTFCMD_HAS_WEBP
+	if(ext_equals_shared(ext, "webp"))
+		return vtfcmdWriteWebP(lpPath, lpData, uiWidth, uiHeight, uiChannels, lpError, uiErrorSize);
+#endif
+
 	const vlUInt uiSize = uiWidth * uiHeight * uiChannels;
 	vlByte *lpFlipped = (vlByte *)malloc(uiSize);
 	if(lpFlipped == NULL)
@@ -155,29 +454,9 @@ vlBool vtfcmdWriteImage(const vlChar *lpPath, const vlByte *lpData, vlUInt uiWid
 #include "stb_image.h"
 #include "stb_image_write.h"
 
-static vlBool ext_equals(const char *lpExt, const char *lpWant)
-{
-	while(*lpExt == '.')
-		lpExt++;
-
-	while(*lpExt && *lpWant)
-	{
-		char a = (char)tolower((unsigned char)*lpExt++);
-		char b = (char)tolower((unsigned char)*lpWant++);
-		if(a != b)
-			return vlFalse;
-	}
-
-	return *lpExt == '\0' && *lpWant == '\0';
-}
-
-static const char *find_extension(const char *lpPath)
-{
-	const char *dot = strrchr(lpPath, '.');
-	if(dot == NULL || dot[1] == '\0')
-		return "";
-	return dot + 1;
-}
+// Reuse the shared helpers.
+#define ext_equals ext_equals_shared
+#define find_extension find_extension_shared
 
 vlBool vtfcmdImageIOInit(vlChar *lpError, vlUInt uiErrorSize)
 {
@@ -196,6 +475,17 @@ vlBool vtfcmdLoadImageRGBA(const vlChar *lpPath, VTFCmdLoadedImage *pOut, vlChar
 		return vlFalse;
 
 	memset(pOut, 0, sizeof(*pOut));
+
+	// Handle formats not covered by stb_image.
+	const char *ext = find_extension(lpPath);
+	if(ext_equals(ext, "qoi"))
+		return vtfcmdLoadQOI(lpPath, pOut, lpError, uiErrorSize);
+	if(ext_equals(ext, "exr"))
+		return vtfcmdvtfcmd_LoadEXR(lpPath, pOut, lpError, uiErrorSize);
+#if VTFCMD_HAS_WEBP
+	if(ext_equals(ext, "webp"))
+		return vtfcmdLoadWebP(lpPath, pOut, lpError, uiErrorSize);
+#endif
 
 	int w = 0, h = 0, c = 0;
 	unsigned char *pixels8 = NULL;
@@ -303,9 +593,27 @@ vlBool vtfcmdWriteImage(const vlChar *lpPath, const vlByte *lpData, vlUInt uiWid
 		ok = stbi_write_hdr(lpPath, (int)uiWidth, (int)uiHeight, 3, pixelsf);
 		free(pixelsf);
 	}
+	else if(ext_equals(ext, "qoi"))
+	{
+		return vtfcmdWriteQOI(lpPath, lpData, uiWidth, uiHeight, uiChannels, lpError, uiErrorSize);
+	}
+	else if(ext_equals(ext, "exr"))
+	{
+		return vtfcmdWriteEXR(lpPath, lpData, uiWidth, uiHeight, uiChannels, lpError, uiErrorSize);
+	}
+#if VTFCMD_HAS_WEBP
+	else if(ext_equals(ext, "webp"))
+	{
+		return vtfcmdWriteWebP(lpPath, lpData, uiWidth, uiHeight, uiChannels, lpError, uiErrorSize);
+	}
+#endif
 	else
 	{
-		if(lpError && uiErrorSize > 0) snprintf(lpError, uiErrorSize, "Unsupported export format '%s' (use png, tga, bmp, jpg, hdr).", ext);
+		if(lpError && uiErrorSize > 0) snprintf(lpError, uiErrorSize, "Unsupported export format '%s' (use png, tga, bmp, jpg, hdr, qoi, exr"
+#if VTFCMD_HAS_WEBP
+			", webp"
+#endif
+			").", ext);
 		return vlFalse;
 	}
 

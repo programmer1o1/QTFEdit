@@ -136,6 +136,8 @@ namespace VTFLib
 
 	extern vlSingle sFP16HDRExposure;
 
+	extern vlSingle sDXTQuality;
+
 	extern vlUInt uiVMTParseMode;
 }
 
@@ -161,6 +163,8 @@ typedef enum tagVTFLibOption
 	VTFLIB_BLUESCREEN_CLEAR_B,
 
 	VTFLIB_FP16_HDR_EXPOSURE,
+
+	VTFLIB_DXT_QUALITY,
 
 	VTFLIB_VMT_PARSE_MODE
 } VTFLibOption;

@@ -32,6 +32,16 @@ public:
     bool useAlphaFormat() const;
     VTFImageFormat alphaFormat() const;
 
+private slots:
+    void onPresetSelected(int index);
+    void onSavePresetAs();
+    void onDeletePreset();
+
+private:
+    void rebuildPresetCombo(const QString &selectName = {});
+    void applyValuesFromPrefix(const QString &prefix);
+    void saveValuesToPrefix(const QString &prefix) const;
+
 private:
     QComboBox *textureType_ = nullptr;
     QComboBox *format_ = nullptr;
@@ -57,4 +67,5 @@ private:
     QScrollArea *flagsScroll_ = nullptr;
     QList<QCheckBox *> flagChecks_;
     QDialogButtonBox *buttons_ = nullptr;
+    QComboBox *presetCombo_ = nullptr;
 };

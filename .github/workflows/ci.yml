@@ -32,6 +32,10 @@ jobs:
       - name: Build
         run: cmake --build build --config Release
 
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure -C Release
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -97,6 +101,31 @@ jobs:
 
       - name: Build
         run: cmake --build build-qt --config Release
+
+      - name: Smoke test (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            ./build-qt/VTFEdit/vtfeditqt.app/Contents/MacOS/vtfeditqt --version
+            ./build-qt/VTFEdit/vtfeditqt.app/Contents/MacOS/vtfeditqt --help
+          else
+            ./build-qt/VTFEdit/vtfeditqt --version
+            ./build-qt/VTFEdit/vtfeditqt --help
+          fi
+
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          & .\build-qt\VTFEdit\Release\vtfeditqt.exe --version
+          if ($LASTEXITCODE -ne 0) { throw "vtfeditqt --version failed with $LASTEXITCODE" }
+          & .\build-qt\VTFEdit\Release\vtfeditqt.exe --help
+          if ($LASTEXITCODE -ne 0) { throw "vtfeditqt --help failed with $LASTEXITCODE" }
 
       - name: Install (stage)
         run: cmake --install build-qt --config Release --prefix dist
@@ -246,3 +275,52 @@ jobs:
           compression-level: 9
           path: |
             legacy/sln/vs2019/Build/**
+
+  release:
+    name: Publish GitHub Release
+    needs: [core, qt-gui, winforms-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Package per-platform bundles
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd artifacts
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p ../release-assets
+          for d in */; do
+            name="${d%/}"
+            case "$name" in
+              vtfeditqt-ubuntu-latest)     out="QTFEdit-${version}-linux-x86_64" ;;
+              vtfeditqt-windows-latest)    out="QTFEdit-${version}-windows-x86_64" ;;
+              vtfeditqt-macos-latest)      out="QTFEdit-${version}-macos" ;;
+              core-ubuntu-latest)          out="VTFLib-VTFCmd-${version}-linux-x86_64" ;;
+              core-windows-latest)         out="VTFLib-VTFCmd-${version}-windows-x86_64" ;;
+              core-macos-latest)           out="VTFLib-VTFCmd-${version}-macos" ;;
+              vtfedit-winforms-windows-latest) out="VTFEdit-Reloaded-${version}-winforms-windows-x86_64" ;;
+              *)                            out="${name}-${version}" ;;
+            esac
+            (cd "$d" && zip -r "../../release-assets/${out}.zip" .)
+          done
+          echo "---"
+          ls -la ../release-assets
+
+      - name: Publish release (draft)
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*.zip
+          body_path: CHANGELOG.md
+          draft: true
+          fail_on_unmatched_files: true
+          generate_release_notes: false

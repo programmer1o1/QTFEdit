@@ -1,0 +1,9 @@
+Windows Registry Editor Version 5.00
+
+; Remove QTFEdit file associations installed by vtf-assoc.reg.
+; Run with: reg import vtf-assoc-uninstall.reg
+
+[-HKEY_CURRENT_USER\Software\Classes\QTFEdit.VtfFile]
+[-HKEY_CURRENT_USER\Software\Classes\QTFEdit.VmtFile]
+[-HKEY_CURRENT_USER\Software\Classes\.vtf\OpenWithProgids]
+[-HKEY_CURRENT_USER\Software\Classes\.vmt\OpenWithProgids]

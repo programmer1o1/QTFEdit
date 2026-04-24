@@ -1,0 +1,4 @@
+[Thumbnailer Entry]
+TryExec=vtfcmd
+Exec=vtfcmd -file %i -exportformat png -exportpath %o -silent
+MimeType=image/x-vtf;application/x-vtf;

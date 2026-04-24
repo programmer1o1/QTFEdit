@@ -337,5 +337,111 @@ ASALocalRun/
 # NVidia Nsight GPU debugger configuration file
 *.nvuser
 
-# MFractors (Xamarin productivity tool) working folder 
+# MFractors (Xamarin productivity tool) working folder
 .mfractor/
+
+# -------------------------------------------------------------------
+# QTFEdit project additions (cross-platform, editors, tooling, CTest)
+# -------------------------------------------------------------------
+
+# macOS metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+.TemporaryItems
+.VolumeIcon.icns
+.fseventsd/
+.com.apple.timemachine.donotpresent
+Icon?
+# Catch nested .DS_Store files too (e.g. legacy/.DS_Store, thirdparty/.DS_Store).
+**/.DS_Store
+
+# Linux
+*~
+.fuse_hidden*
+.Trash-*
+.nfs*
+.directory
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Editor swap/backup
+*.swp
+*.swo
+*.swn
+.*.sw?
+*.orig
+*.rej
+*.bak
+
+# Clang/clangd/ccls tooling caches (override the `!*.[Cc]ache/` rule above)
+.cache/
+.clangd/
+.ccls-cache/
+compile_flags.txt
+
+# Qt Creator per-user project state
+CMakeLists.txt.user
+CMakeLists.txt.user.*
+*.qmake.stash
+*.pro.user
+*.pro.user.*
+
+# VS Code / Xcode / Sublime / other editors
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.shared.json
+xcuserdata/
+*.xcworkspace/
+*.xcuserstate
+*.sublime-workspace
+*.sublime-project
+
+# CTest scratch + artifacts that CMake drops into the source tree if ctest is
+# ever invoked from the wrong directory (build/ is preferred).
+/Testing/
+**/Testing/
+CTestTestfile.cmake
+DartConfiguration.tcl
+
+# Coverage / profiling
+*.gcda
+*.gcno
+*.gcov
+coverage/
+*.profdata
+*.profraw
+perf.data
+perf.data.old
+
+# Core dumps
+core
+core.*
+vgcore.*
+
+# Accidental Python venvs
+venv/
+.venv/
+env/
+__pycache__/
+
+# Accidental app bundles inside the source tree (real builds land in build/)
+*.app/
+
+# Crash-report outputs written by the tool during dev runs inside the tree
+crashes/
+
+# Build-tree fallback: anything under build/, build-qt/ etc. is already covered
+# by the [Bb]uild/ pattern above; this is just defensive for alternate names.
+out/
+cmake-build-*/
+

@@ -50,6 +50,7 @@ public:
         vlSingle reflectivityX,
         vlSingle reflectivityY,
         vlSingle reflectivityZ,
+        QString mipQualityText,
         QWidget *parent = nullptr);
 
     ~VtfPropertiesDialog() override;
@@ -73,6 +74,7 @@ private:
     QLabel *lblCounts_ = nullptr;
     QLabel *lblVersion_ = nullptr;
     QLabel *lblFormat_ = nullptr;
+    QLabel *lblMipQuality_ = nullptr;
 
     QLabel *lblFlags_ = nullptr;
     QPushButton *btnEditFlags_ = nullptr;

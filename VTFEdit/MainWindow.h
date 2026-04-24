@@ -4,10 +4,13 @@
 #include <limits>
 
 #include <QColor>
+#include <QDateTime>
 #include <QImage>
 #include <QMainWindow>
 #include <QStringList>
 #include <QTextDocument>
+
+#include <VTFLib.h>
 
 class QAction;
 class QComboBox;
@@ -24,6 +27,9 @@ class QToolButton;
 class QSlider;
 class QButtonGroup;
 class QToolBar;
+class QFileSystemWatcher;
+class QUndoStack;
+class Toast;
 
 class MainWindow final : public QMainWindow {
     Q_OBJECT
@@ -35,7 +41,14 @@ public:
     bool openVtf(const QString &path);
     bool openPath(const QString &path);
 
-    enum class ChannelMode { RGBA, RGB, R, G, B, A };
+    // Undo/redo hooks — called only by QUndoCommand subclasses.
+    void applyFlagsForUndo(vlUInt flags);
+    void applyMinorVersionForUndo(int minor);
+    void applyStartFrameForUndo(unsigned int startFrame);
+    void applyBumpScaleForUndo(float scale);
+    void applyReflectivityForUndo(float x, float y, float z);
+
+    enum class ChannelMode { RGBA, RGB, R, G, B, A, LitNormal, MipDiff };
     enum class BackgroundMode { Checker, Black, White, Custom };
     enum class HdrTonemap { VTFLib, Reinhard, ACES, Clamp };
 
@@ -99,6 +112,9 @@ private slots:
     void findNextInVmt();
     void replaceInVmt();
     void goToLineInVmt();
+    void liveSourceReloadToggled(bool enabled);
+    void onWatchedPathChanged(const QString &path);
+    void watchDebounceTick();
 
 private:
     static constexpr double kMinZoom = 0.01;
@@ -115,9 +131,20 @@ private:
 
     bool importImageFromPath(const QString &path);
     bool importImagesFromPaths(const QStringList &paths);
+
+    void setWatchedVtfPath(const QString &path);
+    void clearWatchedVtfPath();
+    void addLiveSourcePaths(const QStringList &sources);
+    void clearLiveSources();
+    void rebuildFileWatcher();
+    bool rebuildVtfFromLiveSources();
+    void snapshotVtfMtime();
+    void scheduleWatchDebounce();
     bool openVmtFromPath(const QString &path);
     bool createVtfFromRgbaImage(const QImage &rgba8888, const QString &suggestedBaseName);
-    bool createVtfFromRgbaImages(const QList<QImage> &rgba8888Images, const QString &suggestedBaseName);
+    bool createVtfFromRgbaImages(const QList<QImage> &rgba8888Images,
+                                 const QString &suggestedBaseName,
+                                 const QStringList &sourcePaths = {});
     bool maybeAutoCreateVmt(const QString &vtfPath);
     QString defaultVmtTextForVtfPath(const QString &vtfPath) const;
 
@@ -194,6 +221,7 @@ private:
     QAction *actionOpen_ = nullptr;
     QAction *actionOpenVmt_ = nullptr;
     QAction *actionReloadVtf_ = nullptr;
+    QAction *actionDiscardReload_ = nullptr;
     QAction *actionOpenContainingFolder_ = nullptr;
     QAction *actionCloseVtf_ = nullptr;
     QAction *actionCloseVmt_ = nullptr;
@@ -302,4 +330,27 @@ private:
     QComboBox *hdrTonemapCombo_ = nullptr;
 
     QLabel *statusVmt_ = nullptr;
+
+    QFileSystemWatcher *fileWatcher_ = nullptr;
+    QTimer *watchDebounceTimer_ = nullptr;
+    QAction *actionLiveSourceReload_ = nullptr;
+    QAction *actionRetuneLiveSources_ = nullptr;
+    QLabel *statusLive_ = nullptr;
+    Toast *toast_ = nullptr;
+    QUndoStack *undoStack_ = nullptr;
+    QAction *actionUndo_ = nullptr;
+    QAction *actionRedo_ = nullptr;
+
+    QString watchedVtfPath_;
+    QString watchedVtfDir_;
+    QDateTime watchedVtfMtime_;
+    QStringList liveSourcePaths_;
+    QList<QDateTime> liveSourceMtimes_;
+    SVTFCreateOptions liveCreateOpts_{};
+    int liveTextureType_ = 0;
+    bool liveUseAlphaFormat_ = false;
+    VTFImageFormat liveAlphaFormat_ = IMAGE_FORMAT_DXT5;
+    bool liveSourceReloadEnabled_ = false;
+    QDateTime selfSaveTimestamp_;
+    bool liveRebuildInProgress_ = false;
 };

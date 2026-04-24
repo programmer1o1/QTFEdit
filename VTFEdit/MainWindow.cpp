@@ -4,6 +4,11 @@
 #include "CreateVmtDialog.h"
 #include "BatchConvertDialog.h"
 #include "BatchConvertRunDialog.h"
+#include "CommandPaletteDialog.h"
+#include "CrashReporter.h"
+#include "GuiImageLoader.h"
+#include "Toast.h"
+#include "VtfEditCommands.h"
 #include "QtUtil.h"
 #include "VtfFlagsDialog.h"
 #include "VtfPropertiesDialog.h"
@@ -21,6 +26,7 @@
 #include <QApplication>
 #include <QClipboard>
 #include <QDesktopServices>
+#include <QInputDialog>
 #include <QDockWidget>
 #include <QDragEnterEvent>
 #include <QCloseEvent>
@@ -28,6 +34,9 @@
 #include <QContextMenuEvent>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFileSystemWatcher>
+#include <QSet>
+#include <QCryptographicHash>
 #include <QFormLayout>
 #include <QGuiApplication>
 #include <QImageReader>
@@ -54,6 +63,7 @@
 #include <QTimer>
 #include <QToolBar>
 #include <QToolButton>
+#include <QUndoStack>
 #include <QSlider>
 #include <QSignalBlocker>
 #include <QScreen>
@@ -546,31 +556,6 @@ QImage compositeOverBackground(const QImage &rgba, MainWindow::BackgroundMode mo
     return out;
 }
 
-QImage applyExposure8bit(const QImage &rgba8888, double stops) {
-    if(rgba8888.isNull()) return {};
-    if(std::abs(stops) < 1e-12) return rgba8888;
-    QImage src = rgba8888;
-    if(src.format() != QImage::Format_RGBA8888 && src.format() != QImage::Format_ARGB32 && src.format() != QImage::Format_ARGB32_Premultiplied) {
-        src = src.convertToFormat(QImage::Format_RGBA8888);
-    }
-    QImage out = src.convertToFormat(QImage::Format_RGBA8888);
-    const double factor = std::pow(2.0, stops);
-
-    for(int y = 0; y < out.height(); ++y) {
-        auto *row = reinterpret_cast<uchar *>(out.scanLine(y));
-        for(int x = 0; x < out.width(); ++x) {
-            const int i = x * 4;
-            const int r = static_cast<int>(std::lround(row[i + 0] * factor));
-            const int g = static_cast<int>(std::lround(row[i + 1] * factor));
-            const int b = static_cast<int>(std::lround(row[i + 2] * factor));
-            row[i + 0] = static_cast<uchar>(std::clamp(r, 0, 255));
-            row[i + 1] = static_cast<uchar>(std::clamp(g, 0, 255));
-            row[i + 2] = static_cast<uchar>(std::clamp(b, 0, 255));
-        }
-    }
-    return out;
-}
-
 QImage channelView(const QImage &rgba, MainWindow::ChannelMode mode) {
     if(rgba.isNull()) return {};
     QImage src = rgba;
@@ -578,13 +563,42 @@ QImage channelView(const QImage &rgba, MainWindow::ChannelMode mode) {
         src = src.convertToFormat(QImage::Format_ARGB32);
     }
 
-    if(mode == MainWindow::ChannelMode::RGBA || mode == MainWindow::ChannelMode::RGB) {
+    if(mode == MainWindow::ChannelMode::RGBA
+       || mode == MainWindow::ChannelMode::RGB
+       || mode == MainWindow::ChannelMode::MipDiff) {
         return src;
     }
 
-    QImage out(src.size(), QImage::Format_RGB32);
     const int w = src.width();
     const int h = src.height();
+
+    if(mode == MainWindow::ChannelMode::LitNormal) {
+        // Interpret RG as tangent-space normal XY (remapped [0,1]→[-1,1]); Z derived.
+        // Fixed light: (-0.3, -0.3, 0.9) normalized, with a small ambient term.
+        const double lx = -0.3, ly = -0.3, lz = 0.9;
+        const double ln = std::sqrt(lx * lx + ly * ly + lz * lz);
+        const double Lx = lx / ln, Ly = ly / ln, Lz = lz / ln;
+        const double ambient = 0.12;
+        QImage out(src.size(), QImage::Format_RGB32);
+        for(int y = 0; y < h; ++y) {
+            const auto *srcRow = reinterpret_cast<const QRgb *>(src.constScanLine(y));
+            auto *dst = reinterpret_cast<QRgb *>(out.scanLine(y));
+            for(int x = 0; x < w; ++x) {
+                const double nx = qRed(srcRow[x]) / 255.0 * 2.0 - 1.0;
+                const double ny = qGreen(srcRow[x]) / 255.0 * 2.0 - 1.0;
+                double nz2 = 1.0 - nx * nx - ny * ny;
+                const double nz = nz2 > 0.0 ? std::sqrt(nz2) : 0.0;
+                double d = nx * Lx + ny * Ly + nz * Lz;
+                if(d < 0.0) d = 0.0;
+                d = std::min(1.0, ambient + d * (1.0 - ambient));
+                const int v = static_cast<int>(std::lround(d * 255.0));
+                dst[x] = qRgb(v, v, v);
+            }
+        }
+        return out;
+    }
+
+    QImage out(src.size(), QImage::Format_RGB32);
     for(int y = 0; y < h; ++y) {
         const auto *srcRow = reinterpret_cast<const QRgb *>(src.constScanLine(y));
         auto *dst = reinterpret_cast<QRgb *>(out.scanLine(y));
@@ -687,12 +701,6 @@ QString cubeFaceFileTag(unsigned int face) {
     }
 }
 
-int leadingSpacesCount(const QString &s) {
-    int n = 0;
-    while(n < s.size() && s.at(n) == QChar(' ')) ++n;
-    return n;
-}
-
 bool imageHasTransparencyRgba8888(const QImage &rgba8888) {
     if(rgba8888.isNull()) return false;
     if(rgba8888.format() != QImage::Format_RGBA8888) return false;
@@ -712,6 +720,86 @@ QString quotedKvdValue(QString s) {
     s.replace('\r', "");
     s.replace('\n', "\\n");
     return QString("\"%1\"").arg(s);
+}
+
+QString cubemapFaceSettingsKey(const QString &vtfPath) {
+    if(vtfPath.isEmpty()) return {};
+    const QByteArray digest = QCryptographicHash::hash(
+        QFileInfo(vtfPath).absoluteFilePath().toUtf8(), QCryptographicHash::Sha1);
+    return QString("cubemap/face/%1").arg(QString::fromLatin1(digest.toHex()));
+}
+
+QString vtfPathHashHex(const QString &vtfPath) {
+    if(vtfPath.isEmpty()) return {};
+    const QByteArray digest = QCryptographicHash::hash(
+        QFileInfo(vtfPath).absoluteFilePath().toUtf8(), QCryptographicHash::Sha1);
+    return QString::fromLatin1(digest.toHex());
+}
+
+// Cubemap face direction vectors: standard OpenGL convention.
+// Returns a direction (dx, dy, dz) for the given face index (0..5) and [−1, 1] uv.
+void cubemapFaceDirection(int face, double u, double v, double &dx, double &dy, double &dz) {
+    switch(face) {
+        case 0: dx =  1.0; dy = -v;   dz = -u;   break; // +X
+        case 1: dx = -1.0; dy = -v;   dz =  u;   break; // -X
+        case 2: dx =  u;   dy =  1.0; dz =  v;   break; // +Y
+        case 3: dx =  u;   dy = -1.0; dz = -v;   break; // -Y
+        case 4: dx =  u;   dy = -v;   dz =  1.0; break; // +Z
+        case 5: dx = -u;   dy = -v;   dz = -1.0; break; // -Z
+        default: dx = 0; dy = 0; dz = 1; break;
+    }
+}
+
+QRgb sampleEquirectBilinear(const QImage &equirect, double theta, double phi) {
+    const int w = equirect.width();
+    const int h = equirect.height();
+    if(w <= 0 || h <= 0) return qRgba(0, 0, 0, 0);
+    const double fu = std::fmod((theta + M_PI) / (2.0 * M_PI), 1.0);
+    const double fv = std::clamp(phi / M_PI, 0.0, 1.0);
+    const double fx = fu * (w - 1);
+    const double fy = fv * (h - 1);
+    const int x0 = static_cast<int>(std::floor(fx));
+    const int y0 = static_cast<int>(std::floor(fy));
+    const int x1 = std::min(w - 1, x0 + 1);
+    const int y1 = std::min(h - 1, y0 + 1);
+    const double tx = fx - x0;
+    const double ty = fy - y0;
+
+    const QRgb p00 = equirect.pixel(x0, y0);
+    const QRgb p10 = equirect.pixel(x1, y0);
+    const QRgb p01 = equirect.pixel(x0, y1);
+    const QRgb p11 = equirect.pixel(x1, y1);
+
+    auto lerp = [](double a, double b, double t) { return a + (b - a) * t; };
+    auto chan = [&](int (*g)(QRgb)) {
+        const double a = lerp(g(p00), g(p10), tx);
+        const double b = lerp(g(p01), g(p11), tx);
+        return static_cast<int>(std::lround(std::clamp(lerp(a, b, ty), 0.0, 255.0)));
+    };
+    return qRgba(chan(qRed), chan(qGreen), chan(qBlue), chan(qAlpha));
+}
+
+QImage equirectToCubeFace(const QImage &equirect, int faceSize, int faceIdx) {
+    QImage out(faceSize, faceSize, QImage::Format_RGBA8888);
+    for(int y = 0; y < faceSize; ++y) {
+        uchar *dst = out.scanLine(y);
+        for(int x = 0; x < faceSize; ++x) {
+            const double u = (x + 0.5) / faceSize * 2.0 - 1.0;
+            const double v = (y + 0.5) / faceSize * 2.0 - 1.0;
+            double dx, dy, dz;
+            cubemapFaceDirection(faceIdx, u, v, dx, dy, dz);
+            const double len = std::sqrt(dx * dx + dy * dy + dz * dz);
+            dx /= len; dy /= len; dz /= len;
+            const double theta = std::atan2(dz, dx);
+            const double phi = std::acos(std::clamp(-dy, -1.0, 1.0));
+            const QRgb c = sampleEquirectBilinear(equirect, theta, phi);
+            dst[x * 4 + 0] = static_cast<uchar>(qRed(c));
+            dst[x * 4 + 1] = static_cast<uchar>(qGreen(c));
+            dst[x * 4 + 2] = static_cast<uchar>(qBlue(c));
+            dst[x * 4 + 3] = static_cast<uchar>(qAlpha(c));
+        }
+    }
+    return out;
 }
 
 } // namespace
@@ -744,6 +832,17 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     actionReloadVtf_->setShortcut(QKeySequence(Qt::Key_F5));
     connect(actionReloadVtf_, &QAction::triggered, this, &MainWindow::reloadVtf);
     actionReloadVtf_->setEnabled(false);
+
+    actionDiscardReload_ = new QAction("&Discard Changes && Reload", this);
+    actionDiscardReload_->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_F5));
+    actionDiscardReload_->setToolTip("Force-reload the VTF from disk, discarding any unsaved edits");
+    connect(actionDiscardReload_, &QAction::triggered, this, [this] {
+        if(currentPath_.isEmpty()) return;
+        vtfDirty_ = false;
+        const QString path = currentPath_;
+        if(openVtf(path)) setStatusInfo(QString("Reverted %1 from disk").arg(QFileInfo(path).fileName()));
+    });
+    actionDiscardReload_->setEnabled(false);
 
     actionOpenContainingFolder_ = new QAction("Open Containing &Folder", this);
     connect(actionOpenContainingFolder_, &QAction::triggered, this, &MainWindow::openContainingFolder);
@@ -908,6 +1007,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     recentFilesMenu_ = menuFile->addMenu("Open &Recent Files");
     menuFile->addSeparator();
     menuFile->addAction(actionReloadVtf_);
+    menuFile->addAction(actionDiscardReload_);
     menuFile->addAction(actionOpenContainingFolder_);
     menuFile->addAction(actionCloseVtf_);
     menuFile->addAction(actionCloseVmt_);
@@ -947,8 +1047,18 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
         saveUiState();
     });
 
+    undoStack_ = new QUndoStack(this);
+    undoStack_->setUndoLimit(200);
+
     auto *menuEdit = menuBar()->addMenu("&Edit");
     {
+        actionUndo_ = undoStack_->createUndoAction(this, "&Undo");
+        actionUndo_->setShortcut(QKeySequence::Undo);
+        actionRedo_ = undoStack_->createRedoAction(this, "&Redo");
+        actionRedo_->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_Z));
+        menuEdit->addAction(actionUndo_);
+        menuEdit->addAction(actionRedo_);
+        menuEdit->addSeparator();
         menuEdit->addAction(actionPasteImage_);
         menuEdit->addSeparator();
 
@@ -989,7 +1099,107 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     menuTools->addAction(actionGenNormalFrame_);
     menuTools->addAction(actionGenNormalAll_);
     menuTools->addAction(actionGenSphereMap_);
+    {
+        auto *actionEquirectCubemap = new QAction("Create &Cubemap From HDRI…", this);
+        actionEquirectCubemap->setToolTip("Sample an equirectangular HDRI into a 6-face Environment Map VTF");
+        connect(actionEquirectCubemap, &QAction::triggered, this, [this] {
+            QSettings s;
+            const QString startDir = s.value("paths/equirect_hdri").toString();
+            const QString path = QFileDialog::getOpenFileName(
+                this, "Equirectangular HDRI",
+                startDir,
+                "HDRI images (*.hdr *.exr *.png *.jpg *.jpeg *.tiff);;All files (*.*)");
+            if(path.isEmpty()) return;
+            s.setValue("paths/equirect_hdri", QFileInfo(path).absolutePath());
+
+            QString loadError;
+            QImage equirect = loadImageFileToRgba8888(path, &loadError);
+            if(equirect.isNull()) {
+                showErrorPopup("Equirect load failed", loadError.isEmpty() ? "Could not read image." : loadError);
+                return;
+            }
+            if(equirect.width() < 2 * equirect.height()) {
+                setStatusError("Equirect expects aspect ratio 2:1; sampling will still proceed.");
+            }
+
+            const QStringList sizes = {"256", "512", "1024", "2048"};
+            bool ok = false;
+            const QString pick = QInputDialog::getItem(this, "Cube face size",
+                                                       "Per-face resolution:", sizes,
+                                                       2, false, &ok);
+            if(!ok) return;
+            const int faceSize = pick.toInt();
+            if(faceSize <= 0) return;
+
+            QList<QImage> faces;
+            faces.reserve(6);
+            for(int f = 0; f < 6; ++f) {
+                faces.push_back(equirectToCubeFace(equirect, faceSize, f));
+            }
+            if(!createVtfFromRgbaImages(faces, QFileInfo(path).completeBaseName() + "_cube")) {
+                setStatusError("Cubemap creation cancelled or failed.");
+            } else {
+                setStatusInfo("Created cubemap from HDRI (6 faces).");
+            }
+        });
+        menuTools->addAction(actionEquirectCubemap);
+    }
     menuTools->addSeparator();
+    actionLiveSourceReload_ = new QAction("&Live Reload From Source", this);
+    actionLiveSourceReload_->setCheckable(true);
+    actionLiveSourceReload_->setEnabled(false);
+    actionLiveSourceReload_->setToolTip(
+        "When a VTF was created from an imported image, re-encode and overwrite the VTF whenever the source file changes.");
+    connect(actionLiveSourceReload_, &QAction::toggled, this, &MainWindow::liveSourceReloadToggled);
+    menuTools->addAction(actionLiveSourceReload_);
+
+    actionRetuneLiveSources_ = new QAction("Retune Live Source Options…", this);
+    actionRetuneLiveSources_->setEnabled(false);
+    actionRetuneLiveSources_->setToolTip(
+        "Change the encoding options used when re-encoding live sources, then rebuild once.");
+    connect(actionRetuneLiveSources_, &QAction::triggered, this, [this] {
+        if(liveSourcePaths_.isEmpty()) return;
+        CreateVtfDialog dlg(this);
+        if(dlg.exec() != QDialog::Accepted) return;
+        liveCreateOpts_ = dlg.options();
+        liveTextureType_ = static_cast<int>(dlg.textureType());
+        liveUseAlphaFormat_ = dlg.useAlphaFormat();
+        liveAlphaFormat_ = dlg.alphaFormat();
+        if(rebuildVtfFromLiveSources()) {
+            setStatusInfo("Live: rebuilt VTF with new options");
+        }
+    });
+    menuTools->addAction(actionRetuneLiveSources_);
+    menuTools->addSeparator();
+
+    {
+        auto *commandPalette = new QAction("&Command Palette…", this);
+        commandPalette->setShortcut(QKeySequence("Ctrl+Shift+P"));
+        commandPalette->setToolTip("Quickly find and run any command");
+        connect(commandPalette, &QAction::triggered, this, [this] {
+            QList<QAction *> collected;
+            QSet<QAction *> seen;
+            const auto menus = menuBar()->actions();
+            std::function<void(QMenu *)> walk = [&](QMenu *m) {
+                if(!m) return;
+                for(QAction *a : m->actions()) {
+                    if(!a || a->isSeparator()) continue;
+                    if(a->menu()) { walk(a->menu()); continue; }
+                    if(seen.contains(a)) continue;
+                    seen.insert(a);
+                    collected.append(a);
+                }
+            };
+            for(QAction *topA : menus) {
+                if(topA && topA->menu()) walk(topA->menu());
+            }
+            CommandPaletteDialog dlg(collected, this);
+            dlg.exec();
+        });
+        addAction(commandPalette);
+        menuTools->addAction(commandPalette);
+        menuTools->addSeparator();
+    }
     {
         auto *optionsMenu = menuTools->addMenu("&Options");
 
@@ -1030,6 +1240,24 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
             QSettings().setValue("options/autoCreateVmt", checked);
         });
         optionsMenu->addAction(autoCreateVmt);
+
+        auto *autoFitOnOpen = new QAction("Auto-&fit Preview on Open", this);
+        autoFitOnOpen->setCheckable(true);
+        autoFitOnOpen->setChecked(s.value("options/autoFitOnOpen", false).toBool());
+        autoFitOnOpen->setToolTip("Automatically fit the preview to the window when a VTF is opened or created");
+        connect(autoFitOnOpen, &QAction::toggled, this, [](bool checked) {
+            QSettings().setValue("options/autoFitOnOpen", checked);
+        });
+        optionsMenu->addAction(autoFitOnOpen);
+
+        auto *reopenLast = new QAction("&Reopen Last Session on Startup", this);
+        reopenLast->setCheckable(true);
+        reopenLast->setChecked(s.value("options/reopenLastSession", false).toBool());
+        reopenLast->setToolTip("When launching, reopen the VTF and VMT that were open at last shutdown");
+        connect(reopenLast, &QAction::toggled, this, [](bool checked) {
+            QSettings().setValue("options/reopenLastSession", checked);
+        });
+        optionsMenu->addAction(reopenLast);
     }
 
     auto *menuView = menuBar()->addMenu("&View");
@@ -1202,6 +1430,14 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     channelCombo_->addItem("G", static_cast<int>(ChannelMode::G));
     channelCombo_->addItem("B", static_cast<int>(ChannelMode::B));
     channelCombo_->addItem("A", static_cast<int>(ChannelMode::A));
+    channelCombo_->addItem("Lit Normal", static_cast<int>(ChannelMode::LitNormal));
+    channelCombo_->setItemData(channelCombo_->count() - 1,
+                                "Shade RG as tangent-space normal XY with a fixed directional light",
+                                Qt::ToolTipRole);
+    channelCombo_->addItem("Mip Diff", static_cast<int>(ChannelMode::MipDiff));
+    channelCombo_->setItemData(channelCombo_->count() - 1,
+                                "Heatmap of |current mip − upscaled next-coarser mip|",
+                                Qt::ToolTipRole);
     connect(channelCombo_, &QComboBox::currentIndexChanged, this, &MainWindow::selectionChanged);
     toolbar->addWidget(channelCombo_);
 
@@ -1644,6 +1880,15 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     playbackTimer_->setInterval(frameMsSpin_->value());
     connect(playbackTimer_, &QTimer::timeout, this, &MainWindow::playbackTick);
 
+    fileWatcher_ = new QFileSystemWatcher(this);
+    connect(fileWatcher_, &QFileSystemWatcher::fileChanged, this, &MainWindow::onWatchedPathChanged);
+    connect(fileWatcher_, &QFileSystemWatcher::directoryChanged, this, &MainWindow::onWatchedPathChanged);
+
+    watchDebounceTimer_ = new QTimer(this);
+    watchDebounceTimer_->setSingleShot(true);
+    watchDebounceTimer_->setInterval(250);
+    connect(watchDebounceTimer_, &QTimer::timeout, this, &MainWindow::watchDebounceTick);
+
     statusBar()->showMessage("Ready");
     statusPixel_ = new QLabel(this);
     statusPixel_->setText("-");
@@ -1660,6 +1905,28 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent) {
     statusVmt_->setText("VMT: -");
     statusVmt_->setMinimumWidth(100);
     statusBar()->addPermanentWidget(statusVmt_);
+    statusLive_ = new QLabel(this);
+    statusLive_->setText("");
+    statusLive_->setMinimumWidth(120);
+    statusBar()->addPermanentWidget(statusLive_);
+
+    toast_ = new Toast(this);
+
+    // Notify about any crash reports from previous runs, deferred so the window is realized first.
+    QTimer::singleShot(500, this, [this] {
+        const int unseen = countUnseenCrashReports();
+        if(unseen > 0 && toast_) {
+            const QString dir = crashReportDirectory();
+            toast_->notifyWithAction(
+                QString("%1 crash report%2 from a previous run — click to open folder")
+                    .arg(unseen)
+                    .arg(unseen == 1 ? "" : "s"),
+                Toast::Level::Warning, 9000,
+                [dir] {
+                    QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
+                });
+        }
+    });
     closeVtf();
     closeVmt();
     loadUiState();
@@ -1675,6 +1942,9 @@ void MainWindow::closeVtf() {
         vlDeleteImage(imageId_);
         imageId_ = kInvalidImageId;
     }
+    clearWatchedVtfPath();
+    clearLiveSources();
+    if(undoStack_) undoStack_->clear();
     currentPath_.clear();
     rawRgbaImage_ = {};
     viewImage_ = {};
@@ -1728,6 +1998,7 @@ void MainWindow::closeVtf() {
     if(statusVmt_) statusVmt_->setText("VMT: -");
 
     actionReloadVtf_->setEnabled(false);
+    if(actionDiscardReload_) actionDiscardReload_->setEnabled(false);
     actionOpenContainingFolder_->setEnabled(false);
     actionCloseVtf_->setEnabled(false);
     actionOpenMatchingVmt_->setEnabled(false);
@@ -1821,10 +2092,12 @@ QString MainWindow::vmtText() const {
 
 void MainWindow::setStatusError(const QString &message) {
     statusBar()->showMessage(message, 8000);
+    if(toast_) toast_->notify(message, Toast::Level::Error, 5500);
 }
 
 void MainWindow::setStatusInfo(const QString &message) {
     statusBar()->showMessage(message, 3000);
+    if(toast_) toast_->notify(message, Toast::Level::Info, 2500);
 }
 
 void MainWindow::schedulePreviewRefresh() {
@@ -2001,6 +2274,17 @@ void MainWindow::loadUiState() {
         }
     }
     rebuildRecentMenus();
+
+    if(s.value("options/reopenLastSession", false).toBool()) {
+        const QString lastVtf = s.value("session/lastVtf").toString();
+        const QString lastVmt = s.value("session/lastVmt").toString();
+        if(!lastVtf.isEmpty() && QFileInfo::exists(lastVtf)) {
+            QTimer::singleShot(0, this, [this, lastVtf] { openVtf(lastVtf); });
+        }
+        if(!lastVmt.isEmpty() && QFileInfo::exists(lastVmt)) {
+            QTimer::singleShot(0, this, [this, lastVmt] { openVmtFromPath(lastVmt); });
+        }
+    }
 }
 
 void MainWindow::saveUiState() const {
@@ -2022,6 +2306,8 @@ void MainWindow::saveUiState() const {
     s.setValue("recent/vmt", vmt);
     s.setValue("ui/geometry", saveGeometry());
     s.setValue("ui/state", saveState());
+    s.setValue("session/lastVtf", currentPath_);
+    s.setValue("session/lastVmt", currentVmtPath_);
 }
 
 void MainWindow::setRecentFilesMax(int maxFiles) {
@@ -2098,6 +2384,17 @@ bool MainWindow::openVtf(const QString &path) {
     vtfDirty_ = false;
     actionSaveVtf_->setEnabled(false);
 
+    {
+        const unsigned int faces = vlImageGetFaceCount();
+        if(faces >= 6) {
+            const QString key = cubemapFaceSettingsKey(path);
+            if(!key.isEmpty()) {
+                const unsigned int saved = QSettings().value(key, 0u).toUInt();
+                if(saved < faces) face_ = saved;
+            }
+        }
+    }
+
     updateUiFromBoundVtf();
     addRecentVtf(path);
     {
@@ -2105,6 +2402,26 @@ bool MainWindow::openVtf(const QString &path) {
         s.setValue("paths/open_vtf", QFileInfo(path).absolutePath());
     }
     setStatusInfo(QString("Opened %1").arg(QFileInfo(path).fileName()));
+    setWatchedVtfPath(path);
+    clearLiveSources();
+    if(undoStack_) undoStack_->clear();
+    {
+        const QString hash = vtfPathHashHex(path);
+        if(!hash.isEmpty()) {
+            QSettings s;
+            const QVariant savedFit = s.value(QString("view/fit/%1").arg(hash));
+            const QVariant savedZoom = s.value(QString("view/zoom/%1").arg(hash));
+            if(savedFit.isValid() && savedFit.toBool() && actionZoomFit_) {
+                QTimer::singleShot(0, this, [this] { if(actionZoomFit_) actionZoomFit_->setChecked(true); zoomFit(); });
+            } else if(savedZoom.isValid()) {
+                const double z = savedZoom.toDouble();
+                if(z > 0.0) QTimer::singleShot(0, this, [this, z] { setZoom(z); });
+            }
+        }
+    }
+    if(QSettings().value("options/autoFitOnOpen", false).toBool() && actionZoomFit_ && !actionZoomFit_->isChecked()) {
+        QTimer::singleShot(0, this, [this] { if(actionZoomFit_) actionZoomFit_->setChecked(true); zoomFit(); });
+    }
     return true;
 }
 
@@ -2113,6 +2430,7 @@ bool MainWindow::openPath(const QString &path) {
     if(path.endsWith(".vtf", Qt::CaseInsensitive)) return openVtf(path);
     if(path.endsWith(".vmt", Qt::CaseInsensitive)) return openVmtFromPath(path);
 
+    if(isExtendedImageExtension(path)) return importImageFromPath(path);
     QImageReader reader(path);
     if(reader.canRead()) return importImageFromPath(path);
 
@@ -2173,6 +2491,7 @@ void MainWindow::updateUiFromBoundVtf() {
     }
 
     actionReloadVtf_->setEnabled(!currentPath_.isEmpty());
+    if(actionDiscardReload_) actionDiscardReload_->setEnabled(!currentPath_.isEmpty());
     actionOpenContainingFolder_->setEnabled(!currentPath_.isEmpty());
     actionCloseVtf_->setEnabled(true);
     actionOpenMatchingVmt_->setEnabled(!currentPath_.isEmpty());
@@ -2572,6 +2891,15 @@ void MainWindow::updateZoomUi() {
     zoomCombo_->blockSignals(true);
     zoomCombo_->setCurrentText(QString("%1%").arg(pct));
     zoomCombo_->blockSignals(false);
+
+    if(!currentPath_.isEmpty()) {
+        const QString hash = vtfPathHashHex(currentPath_);
+        if(!hash.isEmpty()) {
+            QSettings s;
+            s.setValue(QString("view/zoom/%1").arg(hash), zoom_);
+            s.setValue(QString("view/fit/%1").arg(hash), fitToWindow_);
+        }
+    }
 }
 
 void MainWindow::updateWindowTitle() {
@@ -3117,6 +3445,42 @@ void MainWindow::vtfPropertiesDialog() {
     vlSingle rx = 0, ry = 0, rz = 0;
     vlImageGetReflectivity(&rx, &ry, &rz);
 
+    // Compute PSNR of each mip vs upscaled next-coarser mip. Strictly an advisory quality signal.
+    QString mipQualityText;
+    {
+        const vlUInt mipCount = vlImageGetMipmapCount();
+        if(mipCount > 1) {
+            QStringList parts;
+            for(vlUInt m = 0; m + 1 < mipCount; ++m) {
+                QString err;
+                QImage cur = vtfSelectionToRgba(frame_, face_, slice_, m, &err);
+                QImage coarser = vtfSelectionToRgba(frame_, face_, slice_, m + 1, &err);
+                if(cur.isNull() || coarser.isNull()) { parts.append("-"); continue; }
+                QImage up = coarser.scaled(cur.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+                if(cur.format() != QImage::Format_ARGB32) cur = cur.convertToFormat(QImage::Format_ARGB32);
+                if(up.format()  != QImage::Format_ARGB32) up  = up.convertToFormat(QImage::Format_ARGB32);
+                long long sumSq = 0;
+                qint64 samples = 0;
+                for(int y = 0; y < cur.height(); ++y) {
+                    const auto *a = reinterpret_cast<const QRgb *>(cur.constScanLine(y));
+                    const auto *b = reinterpret_cast<const QRgb *>(up.constScanLine(y));
+                    for(int x = 0; x < cur.width(); ++x) {
+                        const int dr = qRed(a[x]) - qRed(b[x]);
+                        const int dg = qGreen(a[x]) - qGreen(b[x]);
+                        const int db = qBlue(a[x]) - qBlue(b[x]);
+                        sumSq += qint64(dr) * dr + qint64(dg) * dg + qint64(db) * db;
+                        samples += 3;
+                    }
+                }
+                if(samples == 0) { parts.append("-"); continue; }
+                const double mse = double(sumSq) / double(samples);
+                const double psnr = (mse > 0.0) ? (10.0 * std::log10((255.0 * 255.0) / mse)) : 99.0;
+                parts.append(QString::number(psnr, 'f', 1));
+            }
+            mipQualityText = QString("%1 dB (mip 0→N-1)").arg(parts.join(" / "));
+        }
+    }
+
     VtfPropertiesDialog dlg(
         currentPath_,
         vlImageGetWidth(),
@@ -3134,64 +3498,99 @@ void MainWindow::vtfPropertiesDialog() {
         rx,
         ry,
         rz,
+        mipQualityText,
         this);
 
     if(dlg.exec() != QDialog::Accepted) return;
     const auto r = dlg.result();
 
     bool changed = false;
+    const bool useUndo = undoStack_ != nullptr;
+    if(useUndo) undoStack_->beginMacro("Edit VTF properties");
 
     if(vlImageGetMinorVersion() != r.minorVersion) {
-        const vlUInt before = vlImageGetMinorVersion();
-        vlImageSetMinorVersion(r.minorVersion);
-        if(vlImageGetMinorVersion() != r.minorVersion) {
-            showWarningPopup("VTFLib error",
-                             QString("Failed to change minor version from %1 to %2: %3")
-                                 .arg(before)
-                                 .arg(r.minorVersion)
-                                 .arg(QString::fromUtf8(vlGetLastError())));
+        const int before = static_cast<int>(vlImageGetMinorVersion());
+        if(useUndo) {
+            undoStack_->push(new SetVtfMinorVersionCommand(this, before, r.minorVersion));
+            changed = true;
         } else {
+            applyMinorVersionForUndo(r.minorVersion);
             changed = true;
         }
     }
 
     if(vlImageGetFlags() != r.flags) {
-        vlImageSetFlags(r.flags);
-        if(vlImageGetFlags() != r.flags) {
-            showWarningPopup("VTFLib error", QString("Failed to set flags: %1").arg(QString::fromUtf8(vlGetLastError())));
+        const vlUInt before = vlImageGetFlags();
+        if(useUndo) {
+            undoStack_->push(new SetVtfFlagsCommand(this, before, r.flags));
+            changed = true;
         } else {
+            applyFlagsForUndo(r.flags);
             changed = true;
         }
     }
 
     if(vlImageGetStartFrame() != r.startFrame) {
-        vlImageSetStartFrame(r.startFrame);
-        if(vlImageGetStartFrame() != r.startFrame) {
-            showWarningPopup("VTFLib error", QString("Failed to set start frame: %1").arg(QString::fromUtf8(vlGetLastError())));
+        const unsigned int before = vlImageGetStartFrame();
+        if(useUndo) {
+            undoStack_->push(new SetVtfStartFrameCommand(this, before, r.startFrame));
+            changed = true;
         } else {
+            applyStartFrameForUndo(r.startFrame);
             changed = true;
         }
     }
 
     if(vlImageGetBumpmapScale() != r.bumpScale) {
-        vlImageSetBumpmapScale(r.bumpScale);
-        changed = true;
+        const float before = vlImageGetBumpmapScale();
+        if(useUndo) {
+            undoStack_->push(new SetVtfBumpScaleCommand(this, before, r.bumpScale));
+            changed = true;
+        } else {
+            applyBumpScaleForUndo(r.bumpScale);
+            changed = true;
+        }
     }
 
     if(r.computeReflectivity) {
+        vlSingle ox = 0, oy = 0, oz = 0;
+        vlImageGetReflectivity(&ox, &oy, &oz);
         if(!vlImageComputeReflectivity()) {
             showWarningPopup("VTFLib error", QString("Failed to compute reflectivity: %1").arg(QString::fromUtf8(vlGetLastError())));
         } else {
+            vlSingle nx = 0, ny = 0, nz = 0;
+            vlImageGetReflectivity(&nx, &ny, &nz);
+            if(ox != nx || oy != ny || oz != nz) {
+                if(useUndo) {
+                    // Rewind the compute so the command's own redo() lands us on the new value.
+                    vlImageSetReflectivity(ox, oy, oz);
+                    undoStack_->push(new SetVtfReflectivityCommand(this, ox, oy, oz, nx, ny, nz));
+                } else {
+                    if(infoReflectivity_) {
+                        infoReflectivity_->setText(QString("%1, %2, %3")
+                                                       .arg(static_cast<double>(nx), 0, 'g', 6)
+                                                       .arg(static_cast<double>(ny), 0, 'g', 6)
+                                                       .arg(static_cast<double>(nz), 0, 'g', 6));
+                    }
+                }
+            }
             changed = true;
         }
     } else {
         vlSingle cx = 0, cy = 0, cz = 0;
         vlImageGetReflectivity(&cx, &cy, &cz);
         if(cx != r.reflectivityX || cy != r.reflectivityY || cz != r.reflectivityZ) {
-            vlImageSetReflectivity(r.reflectivityX, r.reflectivityY, r.reflectivityZ);
+            if(useUndo) {
+                undoStack_->push(new SetVtfReflectivityCommand(this, cx, cy, cz,
+                                                                r.reflectivityX, r.reflectivityY, r.reflectivityZ));
+            } else {
+                applyReflectivityForUndo(r.reflectivityX, r.reflectivityY, r.reflectivityZ);
+            }
             changed = true;
         }
     }
+
+    if(useUndo) undoStack_->endMacro();
 
     if(r.generateMipmaps) {
         const vlBool srgb = (vlImageGetFlags() & TEXTUREFLAGS_SRGB) ? vlTrue : vlFalse;
@@ -3284,15 +3683,74 @@ void MainWindow::editVtfFlagsDialog() {
     const vlUInt next = dlg.flags();
     if(next == current) return;
 
-    vlImageSetFlags(next);
-    if(vlImageGetFlags() != next) {
+    if(undoStack_) {
+        undoStack_->push(new SetVtfFlagsCommand(this, current, next));
+    } else {
+        applyFlagsForUndo(next);
+    }
+}
+
+void MainWindow::applyFlagsForUndo(vlUInt flags) {
+    if(imageId_ == kInvalidImageId) return;
+    vlBindImage(imageId_);
+    vlImageSetFlags(flags);
+    if(vlImageGetFlags() != flags) {
         showWarningPopup("VTFLib error", QString("Failed to set flags: %1").arg(QString::fromUtf8(vlGetLastError())));
         return;
     }
     vtfDirty_ = true;
-    actionSaveVtf_->setEnabled(true);
-    infoFlags_->setText(QString("0x%1").arg(static_cast<qulonglong>(next), 8, 16, QChar('0')).toUpper());
+    if(actionSaveVtf_) actionSaveVtf_->setEnabled(true);
+    if(infoFlags_) infoFlags_->setText(QString("0x%1").arg(static_cast<qulonglong>(flags), 8, 16, QChar('0')).toUpper());
     setStatusInfo("Updated VTF flags");
+    updateWindowTitle();
+}
+
+void MainWindow::applyMinorVersionForUndo(int minor) {
+    if(imageId_ == kInvalidImageId) return;
+    vlBindImage(imageId_);
+    vlImageSetMinorVersion(static_cast<vlUInt>(minor));
+    vtfDirty_ = true;
+    if(actionSaveVtf_) actionSaveVtf_->setEnabled(true);
+    if(infoVersion_) infoVersion_->setText(QString("%1.%2").arg(vlImageGetMajorVersion()).arg(vlImageGetMinorVersion()));
+    setStatusInfo(QString("Set minor version to %1").arg(minor));
+    updateWindowTitle();
+}
+
+void MainWindow::applyStartFrameForUndo(unsigned int startFrame) {
+    if(imageId_ == kInvalidImageId) return;
+    vlBindImage(imageId_);
+    vlImageSetStartFrame(static_cast<vlUInt>(startFrame));
+    vtfDirty_ = true;
+    if(actionSaveVtf_) actionSaveVtf_->setEnabled(true);
+    if(infoStartFrame_) infoStartFrame_->setText(QString::number(startFrame));
+    setStatusInfo(QString("Set start frame to %1").arg(startFrame));
+    updateWindowTitle();
+}
+
+void MainWindow::applyBumpScaleForUndo(float scale) {
+    if(imageId_ == kInvalidImageId) return;
+    vlBindImage(imageId_);
+    vlImageSetBumpmapScale(scale);
+    vtfDirty_ = true;
+    if(actionSaveVtf_) actionSaveVtf_->setEnabled(true);
+    if(infoBumpScale_) infoBumpScale_->setText(QString::number(static_cast<double>(scale), 'g', 6));
+    setStatusInfo(QString("Set bumpmap scale to %1").arg(static_cast<double>(scale), 0, 'g', 4));
+    updateWindowTitle();
+}
+
+void MainWindow::applyReflectivityForUndo(float x, float y, float z) {
+    if(imageId_ == kInvalidImageId) return;
+    vlBindImage(imageId_);
+    vlImageSetReflectivity(x, y, z);
+    vtfDirty_ = true;
+    if(actionSaveVtf_) actionSaveVtf_->setEnabled(true);
+    if(infoReflectivity_) {
+        infoReflectivity_->setText(QString("%1, %2, %3")
+                                       .arg(static_cast<double>(x), 0, 'g', 6)
+                                       .arg(static_cast<double>(y), 0, 'g', 6)
+                                       .arg(static_cast<double>(z), 0, 'g', 6));
+    }
+    setStatusInfo("Set reflectivity");
     updateWindowTitle();
 }
 
@@ -3315,6 +3773,8 @@ void MainWindow::saveVtf() {
     maybeAutoCreateVmt(currentPath_);
     setStatusInfo(QString("Saved %1").arg(QFileInfo(currentPath_).fileName()));
     updateWindowTitle();
+    selfSaveTimestamp_ = QDateTime::currentDateTime();
+    snapshotVtfMtime();
 }
 
 void MainWindow::saveVmt() {
@@ -3681,7 +4141,9 @@ bool MainWindow::createVtfFromRgbaImage(const QImage &rgba8888, const QString &s
     return createVtfFromRgbaImages({rgba8888}, suggestedBaseName);
 }
 
-bool MainWindow::createVtfFromRgbaImages(const QList<QImage> &rgba8888Images, const QString &suggestedBaseName) {
+bool MainWindow::createVtfFromRgbaImages(const QList<QImage> &rgba8888Images,
+                                         const QString &suggestedBaseName,
+                                         const QStringList &sourcePaths) {
     if(rgba8888Images.isEmpty()) return false;
     for(const auto &img : rgba8888Images) {
         if(img.isNull()) return false;
@@ -3858,6 +4320,19 @@ bool MainWindow::createVtfFromRgbaImages(const QList<QImage> &rgba8888Images, co
     addRecentVtf(savePath);
     maybeAutoCreateVmt(savePath);
     setStatusInfo(QString("Created %1").arg(QFileInfo(savePath).fileName()));
+
+    setWatchedVtfPath(savePath);
+    clearLiveSources();
+    if(QSettings().value("options/autoFitOnOpen", false).toBool() && actionZoomFit_ && !actionZoomFit_->isChecked()) {
+        QTimer::singleShot(0, this, [this] { if(actionZoomFit_) actionZoomFit_->setChecked(true); zoomFit(); });
+    }
+    if(!sourcePaths.isEmpty()) {
+        liveCreateOpts_ = createOpts;
+        liveTextureType_ = static_cast<int>(dlg.textureType());
+        liveUseAlphaFormat_ = dlg.useAlphaFormat();
+        liveAlphaFormat_ = dlg.alphaFormat();
+        addLiveSourcePaths(sourcePaths);
+    }
     return true;
 }
 
@@ -4110,7 +4585,18 @@ void MainWindow::exportAllDialog() {
 void MainWindow::importImageDialog() {
     QSettings s;
     const QString startDir = s.value("paths/import_image").toString();
-    const QStringList paths = QFileDialog::getOpenFileNames(this, "Import Image(s)", startDir, "Images (*.png *.jpg *.jpeg *.bmp);;All files (*.*)");
+    const QStringList paths = QFileDialog::getOpenFileNames(
+        this,
+        "Import Image(s)",
+        startDir,
+        "Images (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp *.tga *.hdr *.psd *.pic *.exr *.qoi *.gif *.ppm *.pgm *.pbm);;"
+        "Targa (*.tga);;"
+        "Radiance HDR (*.hdr);;"
+        "Photoshop (*.psd);;"
+        "OpenEXR (*.exr);;"
+        "QOI (*.qoi);;"
+        "WebP (*.webp);;"
+        "All files (*.*)");
     if(paths.isEmpty()) return;
     s.setValue("paths/import_image", QFileInfo(paths[0]).absolutePath());
     // Defer until after the native file dialog fully closes.
@@ -4126,19 +4612,36 @@ bool MainWindow::importImagesFromPaths(const QStringList &paths) {
     if(paths.isEmpty()) return false;
     if(!maybeSaveVtf()) return false;
 
+    // Animated container (single GIF/APNG) → explode into frames so the Create dialog can
+    // target TextureType::Animated.
+    if(paths.size() == 1 && isAnimatedImageExtension(paths[0])) {
+        QString loadError;
+        QList<QImage> frames = loadAllFramesToRgba8888(paths[0], &loadError);
+        if(frames.size() > 1) {
+            QList<QImage> rgbaFrames;
+            rgbaFrames.reserve(frames.size());
+            for(const auto &f : frames) rgbaFrames.push_back(ensureRgba8888(f));
+            return createVtfFromRgbaImages(rgbaFrames, QFileInfo(paths[0]).completeBaseName(), paths);
+        }
+        if(frames.isEmpty()) {
+            showErrorPopup("Import failed", QString("Failed to read animated image: %1").arg(loadError));
+            return false;
+        }
+        // Single-frame animated: fall through to normal path.
+    }
+
     QList<QImage> images;
     images.reserve(paths.size());
     for(const auto &path : paths) {
-        QImageReader reader(path);
-        reader.setAutoTransform(true);
-        QImage image = reader.read();
+        QString loadError;
+        QImage image = loadImageFileToRgba8888(path, &loadError);
         if(image.isNull()) {
-            showErrorPopup("Import failed", QString("Failed to read image: %1").arg(reader.errorString()));
+            showErrorPopup("Import failed", QString("Failed to read image (%1): %2").arg(QFileInfo(path).fileName(), loadError));
             return false;
         }
         images.push_back(ensureRgba8888(image));
     }
-    return createVtfFromRgbaImages(images, QFileInfo(paths[0]).completeBaseName());
+    return createVtfFromRgbaImages(images, QFileInfo(paths[0]).completeBaseName(), paths);
 }
 
 void MainWindow::saveAsVtfDialog() {
@@ -4166,6 +4669,7 @@ void MainWindow::saveAsVtfDialog() {
     addRecentVtf(path);
     maybeAutoCreateVmt(path);
     setStatusInfo(QString("Saved %1").arg(QFileInfo(path).fileName()));
+    setWatchedVtfPath(path);
 }
 
 void MainWindow::zoomIn() {
@@ -4297,6 +4801,14 @@ void MainWindow::selectionChanged() {
     channel_ = static_cast<ChannelMode>(channelCombo_->currentData().toInt());
     background_ = static_cast<BackgroundMode>(backgroundCombo_->currentData().toInt());
 
+    if(imageId_ != kInvalidImageId && !currentPath_.isEmpty()) {
+        vlBindImage(imageId_);
+        if(vlImageGetFaceCount() >= 6) {
+            const QString key = cubemapFaceSettingsKey(currentPath_);
+            if(!key.isEmpty()) QSettings().setValue(key, face_);
+        }
+    }
+
     // Slice count depends on mip level (depth shrinks with mipmaps).
     updateSelectionLimits();
     renderSelection();
@@ -4371,6 +4883,60 @@ void MainWindow::renderSelection(bool showErrorPopup) {
         }
         return;
     }
+
+    const auto channelMode = channelCombo_
+        ? static_cast<ChannelMode>(channelCombo_->currentData().toInt())
+        : ChannelMode::RGBA;
+    if(channelMode == ChannelMode::MipDiff) {
+        vlBindImage(imageId_);
+        const vlUInt mipCount = vlImageGetMipmapCount();
+        if(mip_ + 1 >= mipCount) {
+            setStatusInfo("Mip Diff: no coarser mip available at this level.");
+        } else {
+            QString err;
+            QImage coarser = vtfSelectionToRgba(frame_, face_, slice_, mip_ + 1, &err);
+            if(!coarser.isNull()) {
+                QImage coarserUp = coarser.scaled(rgba.size(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+                QImage heat(rgba.size(), QImage::Format_RGBA8888);
+                QImage cur = rgba;
+                if(cur.format() != QImage::Format_ARGB32) cur = cur.convertToFormat(QImage::Format_ARGB32);
+                QImage up = coarserUp;
+                if(up.format() != QImage::Format_ARGB32) up = up.convertToFormat(QImage::Format_ARGB32);
+                for(int y = 0; y < cur.height(); ++y) {
+                    const auto *a = reinterpret_cast<const QRgb *>(cur.constScanLine(y));
+                    const auto *b = reinterpret_cast<const QRgb *>(up.constScanLine(y));
+                    uchar *dst = heat.scanLine(y);
+                    for(int x = 0; x < cur.width(); ++x) {
+                        const int dr = std::abs(qRed(a[x]) - qRed(b[x]));
+                        const int dg = std::abs(qGreen(a[x]) - qGreen(b[x]));
+                        const int db = std::abs(qBlue(a[x]) - qBlue(b[x]));
+                        const int d = std::max({dr, dg, db});
+                        // Simple blue → green → yellow → red colormap, punchy so small diffs show.
+                        const double t = std::min(1.0, d / 96.0);
+                        int r, g, bch;
+                        if(t < 0.5) {
+                            const double u = t * 2.0;
+                            r = 0;
+                            g = static_cast<int>(std::lround(255 * u));
+                            bch = static_cast<int>(std::lround(255 * (1.0 - u)));
+                        } else {
+                            const double u = (t - 0.5) * 2.0;
+                            r = static_cast<int>(std::lround(255 * u));
+                            g = 255 - static_cast<int>(std::lround(160 * u));
+                            bch = 0;
+                        }
+                        dst[x * 4 + 0] = static_cast<uchar>(r);
+                        dst[x * 4 + 1] = static_cast<uchar>(g);
+                        dst[x * 4 + 2] = static_cast<uchar>(bch);
+                        dst[x * 4 + 3] = 255;
+                    }
+                }
+                setViewImage(heat);
+                return;
+            }
+        }
+    }
+
     setViewImage(rgba);
 }
 
@@ -4413,6 +4979,10 @@ void MainWindow::dragEnterEvent(QDragEnterEvent *event) {
         return;
     }
 
+    if(isExtendedImageExtension(local)) {
+        event->acceptProposedAction();
+        return;
+    }
     QImageReader reader(local);
     if(reader.canRead()) {
         event->acceptProposedAction();
@@ -4435,6 +5005,10 @@ void MainWindow::dropEvent(QDropEvent *event) {
         return;
     }
 
+    if(isExtendedImageExtension(local)) {
+        importImageFromPath(local);
+        return;
+    }
     QImageReader reader(local);
     if(reader.canRead()) {
         importImageFromPath(local);
@@ -4632,4 +5206,301 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
     }
 
     return QMainWindow::eventFilter(watched, event);
+}
+
+void MainWindow::setWatchedVtfPath(const QString &path) {
+    clearWatchedVtfPath();
+    if(path.isEmpty()) return;
+    watchedVtfPath_ = path;
+    if(fileWatcher_) {
+        fileWatcher_->addPath(path);
+        // Also watch the parent dir so atomic-save (write-tmp + rename) replacements
+        // are picked up even when the file watch is dropped mid-rename.
+        const QString dir = QFileInfo(path).absolutePath();
+        if(!dir.isEmpty() && !fileWatcher_->directories().contains(dir)) {
+            fileWatcher_->addPath(dir);
+            watchedVtfDir_ = dir;
+        } else {
+            watchedVtfDir_ = dir;
+        }
+    }
+    snapshotVtfMtime();
+}
+
+void MainWindow::clearWatchedVtfPath() {
+    if(fileWatcher_) {
+        if(!watchedVtfPath_.isEmpty()) fileWatcher_->removePath(watchedVtfPath_);
+        if(!watchedVtfDir_.isEmpty()) {
+            // Only drop the dir watch if no live source is using it.
+            bool stillNeeded = false;
+            for(const auto &p : liveSourcePaths_) {
+                if(QFileInfo(p).absolutePath() == watchedVtfDir_) { stillNeeded = true; break; }
+            }
+            if(!stillNeeded) fileWatcher_->removePath(watchedVtfDir_);
+        }
+    }
+    watchedVtfPath_.clear();
+    watchedVtfDir_.clear();
+    watchedVtfMtime_ = {};
+}
+
+void MainWindow::snapshotVtfMtime() {
+    if(watchedVtfPath_.isEmpty()) return;
+    watchedVtfMtime_ = QFileInfo(watchedVtfPath_).lastModified();
+    // QFileSystemWatcher drops the path on some platforms after the file is replaced; re-add defensively.
+    if(fileWatcher_ && !fileWatcher_->files().contains(watchedVtfPath_)) {
+        fileWatcher_->addPath(watchedVtfPath_);
+    }
+}
+
+void MainWindow::addLiveSourcePaths(const QStringList &sources) {
+    for(const auto &p : sources) {
+        if(p.isEmpty()) continue;
+        if(liveSourcePaths_.contains(p)) continue;
+        liveSourcePaths_.append(p);
+        liveSourceMtimes_.append(QFileInfo(p).lastModified());
+    }
+    rebuildFileWatcher();
+    if(actionLiveSourceReload_) actionLiveSourceReload_->setEnabled(!liveSourcePaths_.isEmpty());
+    if(actionRetuneLiveSources_) actionRetuneLiveSources_->setEnabled(!liveSourcePaths_.isEmpty());
+    if(statusLive_) {
+        if(liveSourcePaths_.isEmpty()) statusLive_->setText("");
+        else if(liveSourceReloadEnabled_) statusLive_->setText(QString("Live: %1").arg(liveSourcePaths_.size()));
+    }
+}
+
+void MainWindow::clearLiveSources() {
+    if(fileWatcher_ && !liveSourcePaths_.isEmpty()) {
+        fileWatcher_->removePaths(liveSourcePaths_);
+        QSet<QString> dirs;
+        for(const auto &p : liveSourcePaths_) dirs.insert(QFileInfo(p).absolutePath());
+        if(!dirs.isEmpty()) fileWatcher_->removePaths(QStringList(dirs.begin(), dirs.end()));
+    }
+    liveSourcePaths_.clear();
+    liveSourceMtimes_.clear();
+    if(actionLiveSourceReload_) {
+        actionLiveSourceReload_->setEnabled(false);
+        if(actionLiveSourceReload_->isChecked()) {
+            QSignalBlocker b(actionLiveSourceReload_);
+            actionLiveSourceReload_->setChecked(false);
+        }
+    }
+    if(actionRetuneLiveSources_) actionRetuneLiveSources_->setEnabled(false);
+    liveSourceReloadEnabled_ = false;
+    if(statusLive_) statusLive_->setText("");
+}
+
+void MainWindow::rebuildFileWatcher() {
+    if(!fileWatcher_ || !liveSourceReloadEnabled_) return;
+    QStringList toAddFiles;
+    QStringList toAddDirs;
+    const auto existingFiles = fileWatcher_->files();
+    const auto existingDirs = fileWatcher_->directories();
+    QSet<QString> dirSet;
+    for(const auto &p : liveSourcePaths_) {
+        if(!existingFiles.contains(p) && QFileInfo::exists(p)) toAddFiles.append(p);
+        const QString dir = QFileInfo(p).absolutePath();
+        if(dir.isEmpty()) continue;
+        if(dirSet.contains(dir)) continue;
+        dirSet.insert(dir);
+        if(!existingDirs.contains(dir) && QFileInfo::exists(dir)) toAddDirs.append(dir);
+    }
+    if(!toAddFiles.isEmpty()) fileWatcher_->addPaths(toAddFiles);
+    if(!toAddDirs.isEmpty()) fileWatcher_->addPaths(toAddDirs);
+}
+
+void MainWindow::liveSourceReloadToggled(bool enabled) {
+    liveSourceReloadEnabled_ = enabled;
+    if(enabled) {
+        rebuildFileWatcher();
+        if(statusLive_) statusLive_->setText(QString("Live: %1").arg(liveSourcePaths_.size()));
+        setStatusInfo("Live source reload enabled");
+    } else {
+        if(fileWatcher_ && !liveSourcePaths_.isEmpty()) {
+            fileWatcher_->removePaths(liveSourcePaths_);
+            QSet<QString> dirs;
+            for(const auto &p : liveSourcePaths_) dirs.insert(QFileInfo(p).absolutePath());
+            if(!dirs.isEmpty()) fileWatcher_->removePaths(QStringList(dirs.begin(), dirs.end()));
+        }
+        if(statusLive_) statusLive_->setText("");
+        setStatusInfo("Live source reload disabled");
+    }
+}
+
+void MainWindow::onWatchedPathChanged(const QString & /*path*/) {
+    scheduleWatchDebounce();
+}
+
+void MainWindow::scheduleWatchDebounce() {
+    if(watchDebounceTimer_) watchDebounceTimer_->start();
+}
+
+void MainWindow::watchDebounceTick() {
+    if(liveRebuildInProgress_) return;
+
+    if(!watchedVtfPath_.isEmpty()) {
+        const QFileInfo fi(watchedVtfPath_);
+        if(fi.exists()) {
+            const QDateTime mt = fi.lastModified();
+            const bool selfSave = selfSaveTimestamp_.isValid()
+                                  && qAbs(selfSaveTimestamp_.msecsTo(mt)) < 2000
+                                  && qAbs(selfSaveTimestamp_.msecsTo(QDateTime::currentDateTime())) < 2000;
+            if(mt.isValid() && mt != watchedVtfMtime_ && !selfSave) {
+                if(!vtfDirty_ && imageId_ != kInvalidImageId) {
+                    const unsigned int savedFrame = frame_, savedFace = face_, savedSlice = slice_, savedMip = mip_;
+                    const QString path = watchedVtfPath_;
+                    if(openVtf(path)) {
+                        frame_ = savedFrame;
+                        face_ = savedFace;
+                        slice_ = savedSlice;
+                        mip_ = savedMip;
+                        updateSelectionLimits();
+                        renderSelection(false);
+                        setStatusInfo(QString("Auto-reloaded %1 (external change)").arg(fi.fileName()));
+                    }
+                } else {
+                    setStatusError(QString("%1 changed on disk — reload to pick up changes").arg(fi.fileName()));
+                    watchedVtfMtime_ = mt;
+                }
+            }
+        }
+        if(fileWatcher_ && !fileWatcher_->files().contains(watchedVtfPath_) && QFileInfo::exists(watchedVtfPath_)) {
+            fileWatcher_->addPath(watchedVtfPath_);
+        }
+    }
+
+    if(liveSourceReloadEnabled_ && !liveSourcePaths_.isEmpty()) {
+        bool anyChanged = false;
+        for(int i = 0; i < liveSourcePaths_.size(); ++i) {
+            const QFileInfo fi(liveSourcePaths_[i]);
+            if(!fi.exists()) continue;
+            const QDateTime mt = fi.lastModified();
+            if(mt.isValid() && mt != liveSourceMtimes_[i]) {
+                liveSourceMtimes_[i] = mt;
+                anyChanged = true;
+            }
+        }
+        if(anyChanged) {
+            if(rebuildVtfFromLiveSources()) {
+                setStatusInfo("Live: rebuilt VTF from source change");
+            }
+        }
+        rebuildFileWatcher();
+    }
+}
+
+bool MainWindow::rebuildVtfFromLiveSources() {
+    if(liveSourcePaths_.isEmpty()) return false;
+    if(watchedVtfPath_.isEmpty()) return false;
+    if(liveRebuildInProgress_) return false;
+
+    liveRebuildInProgress_ = true;
+    struct Guard {
+        bool *flag;
+        ~Guard() { *flag = false; }
+    } guard{&liveRebuildInProgress_};
+
+    QList<QImage> images;
+    images.reserve(liveSourcePaths_.size());
+    for(const auto &p : liveSourcePaths_) {
+        QString loadError;
+        QImage img = loadImageFileToRgba8888(p, &loadError);
+        if(img.isNull()) {
+            setStatusError(QString("Live: failed to read %1 — %2").arg(QFileInfo(p).fileName(), loadError));
+            return false;
+        }
+        images.push_back(ensureRgba8888(img));
+    }
+
+    const int w = images[0].width();
+    const int h = images[0].height();
+    for(const auto &img : images) {
+        if(img.width() != w || img.height() != h) {
+            setStatusError("Live: source images have differing dimensions");
+            return false;
+        }
+    }
+
+    vlUInt frames = 1, faces = 1, slices = 1;
+    switch(static_cast<CreateVtfDialog::TextureType>(liveTextureType_)) {
+        case CreateVtfDialog::TextureType::Animated:
+            frames = static_cast<vlUInt>(images.size());
+            break;
+        case CreateVtfDialog::TextureType::EnvironmentMap:
+            faces = static_cast<vlUInt>(images.size());
+            break;
+        case CreateVtfDialog::TextureType::VolumeTexture:
+            slices = static_cast<vlUInt>(images.size());
+            break;
+    }
+
+    bool hasAlpha = false;
+    for(const auto &img : images) {
+        if(imageHasTransparencyRgba8888(img)) { hasAlpha = true; break; }
+    }
+    SVTFCreateOptions createOpts = liveCreateOpts_;
+    if(liveUseAlphaFormat_ && hasAlpha) createOpts.ImageFormat = liveAlphaFormat_;
+
+    if(!vtflibCanEncode(createOpts.ImageFormat)) {
+        setStatusError("Live: VTFLib cannot encode selected format");
+        return false;
+    }
+
+    vlUInt newImageId = 0;
+    if(!vlCreateImage(&newImageId)) {
+        setStatusError(QString("Live: vlCreateImage failed: %1").arg(QString::fromUtf8(vlGetLastError())));
+        return false;
+    }
+    if(!vlBindImage(newImageId)) {
+        vlDeleteImage(newImageId);
+        setStatusError(QString("Live: vlBindImage failed: %1").arg(QString::fromUtf8(vlGetLastError())));
+        return false;
+    }
+
+    std::vector<std::vector<vlByte>> rgbaBytes;
+    rgbaBytes.reserve(static_cast<size_t>(images.size()));
+    std::vector<vlByte *> rgbaPtrs;
+    rgbaPtrs.reserve(static_cast<size_t>(images.size()));
+    for(const auto &img : images) {
+        rgbaBytes.push_back(qimageToContiguousRgba(img));
+        rgbaPtrs.push_back(rgbaBytes.back().data());
+    }
+
+    const bool created = (images.size() == 1)
+        ? (vlImageCreateSingle(static_cast<vlUInt>(w), static_cast<vlUInt>(h), rgbaPtrs[0], &createOpts) != 0)
+        : (vlImageCreateMultiple(static_cast<vlUInt>(w), static_cast<vlUInt>(h),
+                                  frames, faces, slices, rgbaPtrs.data(), &createOpts) != 0);
+    if(!created) {
+        setStatusError(QString("Live: vlImageCreate failed: %1").arg(QString::fromUtf8(vlGetLastError())));
+        vlDeleteImage(newImageId);
+        return false;
+    }
+
+    const QByteArray encoded = QFile::encodeName(watchedVtfPath_);
+    if(!vlImageSave(encoded.constData())) {
+        setStatusError(QString("Live: save failed: %1").arg(QString::fromUtf8(vlGetLastError())));
+        vlDeleteImage(newImageId);
+        return false;
+    }
+
+    if(imageId_ != kInvalidImageId) vlDeleteImage(imageId_);
+    imageId_ = newImageId;
+
+    const unsigned int savedFrame = frame_, savedFace = face_, savedSlice = slice_, savedMip = mip_;
+    vtfDirty_ = false;
+    actionSaveVtf_->setEnabled(false);
+    updateUiFromBoundVtf();
+    const vlUInt maxFrames = vlImageGetFrameCount();
+    const vlUInt maxFaces = vlImageGetFaceCount();
+    const vlUInt maxMips = vlImageGetMipmapCount();
+    frame_ = (maxFrames > 0 && savedFrame < maxFrames) ? savedFrame : 0;
+    face_ = (maxFaces > 0 && savedFace < maxFaces) ? savedFace : 0;
+    slice_ = savedSlice;
+    mip_ = (maxMips > 0 && savedMip < maxMips) ? savedMip : 0;
+    updateSelectionLimits();
+    renderSelection(false);
+
+    selfSaveTimestamp_ = QDateTime::currentDateTime();
+    snapshotVtfMtime();
+    return true;
 }

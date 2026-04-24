@@ -1,6 +1,8 @@
-# QTFEdit v3.0 (Qt GUI for VTFLib)
+# QTFEdit v3.5 (Qt GUI for VTFLib)
 
 QTFEdit is the primary GUI frontend for VTFLib, implemented with Qt (Qt 6/5 Widgets) and intended to be cross-platform (Linux/macOS/Windows).
+
+Release notes and the cumulative feature history live in [`CHANGELOG.md`](CHANGELOG.md). The VTFEdit Reloaded parity checklist is [`docs/parity.md`](docs/parity.md); the full forward roadmap is [`docs/roadmap.md`](docs/roadmap.md).
 
 This repository contains:
 
@@ -76,10 +78,64 @@ Notes:
 - VTF Properties can edit start frame, bump scale, reflectivity, and can regenerate mipmaps/thumbnail.
 - VMT creation wizard can generate a starter `.vmt` (and can derive `$basetexture` when the VTF path contains `materials/`).
 - DXT formats (DXT1/3/5/ATI) require a compressor for import/export, and require Compressonator for viewing/decompression on non-Windows builds; without it only uncompressed formats will work reliably.
+- Import supports PNG, JPG/JPEG, BMP, TIFF, WebP, GIF, PPM/PGM/PBM natively via Qt; TGA, Radiance HDR, Photoshop PSD (basic), and Softimage PIC via bundled `stb_image`; OpenEXR via tinyexr; and QOI via `qoi.h`. HDR sources are converted to 8-bit sRGB on import (clamp + 1/2.2 gamma) — use an HDR VTF format target if you need the full range.
+- On Linux, install `packaging/linux/vtf.thumbnailer` + `packaging/linux/vtf-mime.xml` (or run `cmake --install` on a Linux build — the files ship to `share/thumbnailers` and `share/mime/packages`) to get `.vtf` thumbnails in Nautilus / Nemo / Thunar / Caja / PCManFM / any freedesktop-compliant file manager. See `packaging/linux/README.md` for step-by-step instructions.
+- On Windows, `reg import packaging/windows/vtf-assoc.reg` (after editing the path inside) registers `.vtf` / `.vmt` with QTFEdit. See `packaging/windows/README.md`.
+- `vtfcmd -exportpath <file>` — single-output path flag, used by shell thumbnailers that pass an exact destination via `%o`.
+- `vtfcmd -mfilter nice` / Qt dialog "Nice (sRGB-aware box)" — Valve-style NICE mipmap filter that forces gamma-correct downsampling regardless of the `-srgb` flag.
+- Opening a console VTF (Xbox 360 / PS3) or a Strata Source compressed VTF fails with a specific error pointing at `docs/roadmap.md` instead of a generic "corrupt file" — those formats are recognised but not yet supported.
+- Animated GIF / APNG import auto-expands into Animated-VTF frames.
+- A **Lit Normal** channel mode previews the RG components as a tangent-space normal map under a fixed directional light.
+- A **Mip Diff** channel mode overlays a heatmap of how much a mip level differs from the next coarser one — useful for catching bad filter choices.
+- `Tools → Create Cubemap From HDRI…` samples an equirectangular HDRI into a 6-face Environment-Map VTF (bilinear CPU sampler; 256/512/1024/2048 per face).
+- The Create VTF dialog has a **preset bar** (combo + Save As… + Delete). Presets persist in QSettings and cover format, filter, resize, sRGB/gamma, and flags.
+- Non-modal **toast notifications** for operational info/warn/error messages, replacing most `QMessageBox::information` popups.
+- **Undo/redo** (Ctrl+Z / Ctrl+Shift+Z) — VTF flags, minor version, start frame, bumpmap scale, and reflectivity edits route through a `QUndoStack`; Properties-dialog multi-field edits are grouped into a single undo macro. The stack is cleared when a different VTF is opened.
+- **Crash reporting** — on fatal signal / unhandled exception the app writes a minimal report (signal name + backtrace on POSIX, exception code + stack frame pointers on Windows) to `<AppDataLocation>/crashes/crash-<epochms>.txt` before the OS takes over. The handler is async-signal-safe on POSIX (plain `open`/`write`/`backtrace_symbols_fd`, no Qt or allocator calls). At next startup, any reports newer than the last-seen timestamp (stored in `QSettings`) surface as a **clickable** non-modal toast — clicking opens the crashes folder via `QDesktopServices`. Hovering the toast pauses auto-hide.
+- Live Reload From Source (Tools menu, opt-in): drop an image to create a VTF, then enable live reload — saving the source in your editor automatically re-encodes the VTF in place. `Retune Live Source Options…` lets you change encoding settings mid-session.
+- Command Palette (Ctrl+Shift+P) — fuzzy-find and run any menu action, with recency and use-count weighting so frequently-used commands surface first.
+
+## Roadmap
+
+VTFEdit Reloaded parity is complete (see [`docs/parity.md`](docs/parity.md)). The headline items still on the table:
+
+- **Strata Source compressed VTF (Deflate / Zstd)** — Strata extends v7.4 / v7.5 with compressed image bodies. QTFEdit currently detects them and fails with a specific error; full read/write support is pending a published format spec.
+- **Console VTF read (Xbox 360, PS3)** — big-endian VTFs with platform-specific tiling / swizzle. QTFEdit detects byte-swapped headers today and fails with a specific error; full support needs an endian abstraction across VTFLib plus 360 / Cell swizzle implementations.
+
+Everything else — split-pane A/B compare, sheet-editor visual timeline, GPU preview path, Windows / macOS shell thumbnail providers, plugin API, extended undo coverage, accessibility & localization passes, and the `MainWindow.cpp` monolith breakup — is catalogued in [`docs/roadmap.md`](docs/roadmap.md).
+
+## Testing
+
+CTest-driven round-trip smoke tests live under `VTFCmd/tests/`. Configure and build, then:
+
+```
+cd build
+ctest --output-on-failure
+```
+
+The suite currently covers:
+
+- `vtfcmd_roundtrip_rgba8888` — RGBA8888, mipmaps on
+- `vtfcmd_roundtrip_bgra8888` — BGRA8888, mipmaps on
+- `vtfcmd_roundtrip_rgb888`   — RGB888 (no alpha), mipmaps on
+- `vtfcmd_roundtrip_rgba8888_nomips` — RGBA8888 with `-nomipmaps`
+- `vtfcmd_roundtrip_mipfilter_box` / `_triangle` / `_catrom` / `_mitchell` / `_kaiser` / `_point` / `_gaussian` / `_nice` — round-trip with each mipmap filter swapped in. All eight filters succeed thanks to the `VTFFilterToStbirFilter` mapping in `VTFLib/VTFFile.cpp` (prior to this fix, passing any filter past `MITCHELL` directly to `stbir_filter()` tripped an stbir assertion).
+- `vtfcmd_roundtrip_animated` — builds a 2-frame animated VTF via the `mkanimvtf` helper (which calls `vlImageCreateMultiple` directly — `vtfcmd -file a -file b` produces separate single-frame VTFs, not a multi-frame one), validates the header has Frames=2, decodes back through `vtfcmd -extract-all-frames`, and pixel-diffs **every frame** against its reference input.
+- `vtfcmd_roundtrip_cubemap` — builds a 6-face environment-map VTF (`mkanimvtf --cube`), validates the VTF header's `TEXTUREFLAGS_ENVMAP` bit is set, decodes back via vtfcmd, and pixel-diffs face 0.
+
+Each test converts `resources/rgb.png` → `.vtf` → `.png` via `vtfcmd`, validates both outputs exist, parses the VTF header bytes to assert the `"VTF\0"` magic and the reported dimensions, and then runs the bundled `imgdiff` helper (stb_image-based) to compare the decoded PNG against a reference copy of the input. Pixels where both sides are fully transparent are ignored (RGB is visually undefined there). The quality gate is a minimum PSNR of 20 dB; the per-channel max-abs-diff gate is intentionally permissive because VTFLib's round-trip reshuffles colour in some alpha-edge pixels. DXT formats are intentionally not in the suite because Compressonator availability varies across platforms.
+
+In addition to the VTFCmd suite, the CI `qt-gui` job runs a headless smoke step (`QT_QPA_PLATFORM=offscreen vtfeditqt --version && --help`) on all three OSes. The Qt GUI binary responds to `--version` / `-v` and `--help` / `-h` before `QApplication` is even instantiated, so the smoke step needs no platform plugin.
+
+The suite totals **14 ctest scenarios**. Add further ones by calling `_add_roundtrip_test(<suffix> <format> "<extra>")` in `VTFCmd/CMakeLists.txt`. The CI `core` job runs `ctest` on every push.
 
 ## CI
 
-GitHub Actions builds the core targets (`vtflib`, `vtfcmd`) on Ubuntu/Windows/macOS, and builds the Qt GUI (`vtfeditqt`) on Ubuntu/Windows/macOS (Qt 6).
+GitHub Actions builds the core targets (`vtflib`, `vtfcmd`) on Ubuntu/Windows/macOS and the Qt GUI (`vtfeditqt`) on Ubuntu/Windows/macOS (Qt 6). The `core` job runs `ctest` (14 round-trip scenarios, PSNR-gated). The `qt-gui` job runs `vtfeditqt --version` / `--help` as a headless smoke test on all three OSes.
+
+### Releases
+
+Pushing a `v*` tag (e.g. `git tag -a v3.5.0 -m "…" && git push origin v3.5.0`) triggers a `release` job that downloads every platform artifact, re-packages each with a versioned name (`QTFEdit-<ver>-linux-x86_64.zip`, `QTFEdit-<ver>-windows-x86_64.zip`, `QTFEdit-<ver>-macos.zip`, plus `VTFLib-VTFCmd-<ver>-*` and `VTFEdit-Reloaded-<ver>-winforms-windows-x86_64.zip`), and opens a **draft** GitHub Release on the Releases tab with `CHANGELOG.md` as the body. Review and click Publish.
 
 ## Optional Dependencies (legacy/Windows)
 
@@ -92,6 +148,7 @@ Parameters:
  -file <path>             (Input file path.)
  -folder <path>           (Input directory search string.)
  -output <path>           (Output directory.)
+ -exportpath <file>       (Exact output file path for single-image export; used by shell thumbnailers.)
  -prefix <string>         (Output file prefix.)
  -postfix <string>        (Output file postfix.)
  -version <string>         (Output version.)
@@ -118,6 +175,11 @@ Parameters:
  -param <string> <string> (Add a parameter to the material.)
  -recurse                 (Process directories recursively.)
  -exportformat <string>   (Convert VTF files to the format of this extension.)
+ -extract-all-frames      (Export all frames from VTF files with a _frameN suffix.)
+ -extract-all-faces       (Export all cubemap faces with a _faceN suffix.)
+ -extract-all-slices      (Export all volume-texture slices with a _sliceN suffix.)
+ -extract-all-mips        (Export all mipmap levels with a _mipN suffix.)
+ -extract-all             (Shorthand for all four -extract-all-* flags.)
  -silent                  (Silent mode.)
  -pause                   (Pause when done.)
  -help                    (Display vtfcmd help.)

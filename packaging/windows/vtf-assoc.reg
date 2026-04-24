@@ -1,0 +1,58 @@
+Windows Registry Editor Version 5.00
+
+; ------------------------------------------------------------------------------
+; QTFEdit file-association template for Windows.
+;
+; Installs .vtf and .vmt extension associations plus a ProgID so that
+; double-click and "Open With → QTFEdit" route through vtfeditqt.exe.
+;
+; Does NOT install a thumbnail provider — that requires a separate COM DLL
+; implementing IThumbnailProvider, which is tracked in docs/roadmap.md.
+;
+; USAGE
+;   1. Edit the InstallPath below to point at your vtfeditqt.exe.
+;   2. Double-click this .reg or run `reg import vtf-assoc.reg`.
+;   3. The first time a user opens a .vtf/.vmt, Windows may prompt them to
+;      confirm QTFEdit as the handler.
+;
+; To remove the associations, use the corresponding vtf-assoc-uninstall.reg
+; in this directory.
+; ------------------------------------------------------------------------------
+
+; --- ProgID: QTFEdit.VtfFile -------------------------------------------------
+[HKEY_CURRENT_USER\Software\Classes\QTFEdit.VtfFile]
+@="Valve Texture Format"
+
+[HKEY_CURRENT_USER\Software\Classes\QTFEdit.VtfFile\DefaultIcon]
+@="\"C:\\Program Files\\QTFEdit\\vtfeditqt.exe\",0"
+
+[HKEY_CURRENT_USER\Software\Classes\QTFEdit.VtfFile\shell\open\command]
+@="\"C:\\Program Files\\QTFEdit\\vtfeditqt.exe\" \"%1\""
+
+; --- ProgID: QTFEdit.VmtFile -------------------------------------------------
+[HKEY_CURRENT_USER\Software\Classes\QTFEdit.VmtFile]
+@="Valve Material Type"
+
+[HKEY_CURRENT_USER\Software\Classes\QTFEdit.VmtFile\DefaultIcon]
+@="\"C:\\Program Files\\QTFEdit\\vtfeditqt.exe\",0"
+
+[HKEY_CURRENT_USER\Software\Classes\QTFEdit.VmtFile\shell\open\command]
+@="\"C:\\Program Files\\QTFEdit\\vtfeditqt.exe\" \"%1\""
+
+; --- Extension -> ProgID mappings --------------------------------------------
+[HKEY_CURRENT_USER\Software\Classes\.vtf]
+@="QTFEdit.VtfFile"
+"Content Type"="image/x-vtf"
+"PerceivedType"="image"
+
+[HKEY_CURRENT_USER\Software\Classes\.vmt]
+@="QTFEdit.VmtFile"
+"Content Type"="text/x-vmt"
+"PerceivedType"="text"
+
+; --- OpenWithProgids (so "Open With" lists QTFEdit even if another app is default)
+[HKEY_CURRENT_USER\Software\Classes\.vtf\OpenWithProgids]
+"QTFEdit.VtfFile"=""
+
+[HKEY_CURRENT_USER\Software\Classes\.vmt\OpenWithProgids]
+"QTFEdit.VmtFile"=""
