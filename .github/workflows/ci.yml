@@ -21,13 +21,28 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
+      - name: Install zlib (Windows, for tinyexr)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Static triplet so vtfcmd.exe doesn't need a zlib1.dll alongside it at runtime.
+          & "C:\vcpkg\vcpkg.exe" install zlib:x64-windows-static
+
       - name: Configure
-        run: >-
-          cmake -S . -B build
-          -DCMAKE_BUILD_TYPE=Release
-          -DVTFLIB_USE_COMPRESSONATOR=${{ runner.os != 'Windows' && 'ON' || 'OFF' }}
-          -DVTFCMD_IMAGE_BACKEND=stb
-          -DBUILD_VTFEDIT_QT=OFF
+        shell: bash
+        run: |
+          extra=""
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            extra="-DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake \
+                   -DVCPKG_TARGET_TRIPLET=x64-windows-static \
+                   -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded\$<\$<CONFIG:Debug>:Debug>"
+          fi
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DVTFLIB_USE_COMPRESSONATOR=${{ runner.os != 'Windows' && 'ON' || 'OFF' }} \
+            -DVTFCMD_IMAGE_BACKEND=stb \
+            -DBUILD_VTFEDIT_QT=OFF \
+            $extra
 
       - name: Build
         run: cmake --build build --config Release
@@ -89,6 +104,14 @@ jobs:
             libxkbcommon-x11-0 \
             libfuse2
 
+      - name: Install zlib (Windows, for tinyexr)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Use the static triplet so zlib's runtime matches the /MT we pass to CMake
+          # via CMAKE_MSVC_RUNTIME_LIBRARY (Compressonator's bundled libs are /MT).
+          & "C:\vcpkg\vcpkg.exe" install zlib:x64-windows-static
+
       - name: Configure
         run: >-
           cmake -S . -B build-qt
@@ -97,7 +120,7 @@ jobs:
           -DBUILD_VTFEDIT_QT=ON
           -DVTFLIB_USE_COMPRESSONATOR=ON
           -DCMAKE_PREFIX_PATH="${{ env.QT_ROOT_DIR }}"
-          ${{ runner.os == 'Windows' && '-A x64 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>' || '' }}
+          ${{ runner.os == 'Windows' && '-A x64 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug> -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=x64-windows-static' || '' }}
 
       - name: Build
         run: cmake --build build-qt --config Release
