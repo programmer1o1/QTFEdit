@@ -41,7 +41,7 @@ endif()
 
 # 1) PNG → VTF.
 execute_process(
-    COMMAND "${VTFCMD}" -file "${_staged_png}" -format "${FORMAT}" ${_extra_args} -silent -output "${WORK_DIR}"
+    COMMAND "${VTFCMD}" -file "${_staged_png}" -format "${FORMAT}" ${_extra_args} -output "${WORK_DIR}"
     RESULT_VARIABLE _rc1
     OUTPUT_VARIABLE _out1
     ERROR_VARIABLE _err1
@@ -93,7 +93,7 @@ endif()
 
 # 2) VTF → PNG. vtfcmd writes alongside the input.
 execute_process(
-    COMMAND "${VTFCMD}" -file "${_produced_vtf}" -exportformat png -silent -output "${WORK_DIR}"
+    COMMAND "${VTFCMD}" -file "${_produced_vtf}" -exportformat png -output "${WORK_DIR}"
     RESULT_VARIABLE _rc2
     OUTPUT_VARIABLE _out2
     ERROR_VARIABLE _err2
