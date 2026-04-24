@@ -1187,6 +1187,29 @@ void ProcessFile(vlChar *lpInputFile)
 
 		CreateOptions.ImageFormat = LoadedImage.uiChannelsInFile == 4 ? AlphaFormat : NormalFormat;
 
+		// VTFLib encodes the low-res (thumbnail) image as DXT1. Without Compressonator the
+		// thumbnail encode fails and aborts the whole Create call. Probe DXT1 availability
+		// on a tiny buffer and, if unavailable, auto-disable the thumbnail + warn — same
+		// behaviour the Qt GUI already has in MainWindow::createVtfFromRgbaImages.
+		if(CreateOptions.bThumbnail)
+		{
+			vlByte probeIn[4 * 4 * 4] = {0};
+			vlUInt probeOutSize = vlImageComputeImageSize(4, 4, 1, 1, IMAGE_FORMAT_DXT1);
+			if(probeOutSize > 0)
+			{
+				vlByte *probeOut = (vlByte *)malloc(probeOutSize);
+				if(probeOut != NULL)
+				{
+					if(!vlImageConvertFromRGBA8888(probeIn, probeOut, 4, 4, IMAGE_FORMAT_DXT1))
+					{
+						CreateOptions.bThumbnail = vlFalse;
+						Print("  Note: DXT1 encoding unavailable — thumbnail disabled.\n");
+					}
+					free(probeOut);
+				}
+			}
+		}
+
 		Print(" Creating texture:\n");
 
 		// Create vtf file.

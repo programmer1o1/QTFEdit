@@ -38,6 +38,10 @@ endif()
 if(MIPMAP_FILTER)
     list(APPEND _extra_args -mfilter "${MIPMAP_FILTER}")
 endif()
+# VTFLib's thumbnail is always DXT1; without Compressonator the thumbnail encode
+# aborts Create. The round-trip tests don't care about thumbnails, so always skip
+# them to keep the suite green on CI runners that build with Compressonator off.
+list(APPEND _extra_args -nothumbnail)
 
 # 1) PNG → VTF.
 execute_process(
