@@ -18,35 +18,43 @@
 #include <string.h>
 
 static void print_usage(FILE *out) {
-    fprintf(out, "Usage: imgdiff <reference.png> <candidate.png> [max_abs_diff [min_psnr_db]]\n");
+    fprintf(out, "Usage: imgdiff [--ignore-alpha] <reference.png> <candidate.png> [max_abs_diff [min_psnr_db]]\n");
 }
 
 int main(int argc, char **argv) {
-    if(argc < 3) {
+    int ignore_alpha = 0;
+    int arg_start = 1;
+    if(argc > 1 && strcmp(argv[1], "--ignore-alpha") == 0) {
+        ignore_alpha = 1;
+        arg_start = 2;
+    }
+    if(argc - arg_start < 2) {
         print_usage(stderr);
         return 2;
     }
     int tol = 4;
     double min_psnr = -1.0; /* disabled by default */
-    if(argc >= 4) {
-        tol = atoi(argv[3]);
+    if(argc - arg_start >= 3) {
+        tol = atoi(argv[arg_start + 2]);
         if(tol < 0) tol = 0;
         if(tol > 255) tol = 255;
     }
-    if(argc >= 5) {
-        min_psnr = atof(argv[4]);
+    if(argc - arg_start >= 4) {
+        min_psnr = atof(argv[arg_start + 3]);
     }
+    const char *ref_path = argv[arg_start];
+    const char *cand_path = argv[arg_start + 1];
 
     int rw = 0, rh = 0, rc = 0;
-    stbi_uc *ref = stbi_load(argv[1], &rw, &rh, &rc, 4);
+    stbi_uc *ref = stbi_load(ref_path, &rw, &rh, &rc, 4);
     if(!ref) {
-        fprintf(stderr, "imgdiff: failed to load reference '%s': %s\n", argv[1], stbi_failure_reason());
+        fprintf(stderr, "imgdiff: failed to load reference '%s': %s\n", ref_path, stbi_failure_reason());
         return 2;
     }
     int cw = 0, ch_ = 0, cc = 0;
-    stbi_uc *cand = stbi_load(argv[2], &cw, &ch_, &cc, 4);
+    stbi_uc *cand = stbi_load(cand_path, &cw, &ch_, &cc, 4);
     if(!cand) {
-        fprintf(stderr, "imgdiff: failed to load candidate '%s': %s\n", argv[2], stbi_failure_reason());
+        fprintf(stderr, "imgdiff: failed to load candidate '%s': %s\n", cand_path, stbi_failure_reason());
         stbi_image_free(ref);
         return 2;
     }
@@ -62,15 +70,16 @@ int main(int argc, char **argv) {
     int max_diff = 0;
     long long sum_sq = 0;
     size_t samples = 0;
+    const int last_channel = ignore_alpha ? 3 : 4; /* 0..3 = RGB only, 0..4 = RGBA */
     for(size_t p = 0; p < pixels; ++p) {
         const size_t base = p * 4;
         const int ar = ref[base + 3];
         const int ac = cand[base + 3];
         /* Fully transparent in both — RGB is visually undefined, skip those channels. */
-        if(ar == 0 && ac == 0) {
+        if(!ignore_alpha && ar == 0 && ac == 0) {
             continue;
         }
-        for(int c = 0; c < 4; ++c) {
+        for(int c = 0; c < last_channel; ++c) {
             int d = (int)ref[base + c] - (int)cand[base + c];
             int ad = d < 0 ? -d : d;
             if(ad > max_diff) max_diff = ad;

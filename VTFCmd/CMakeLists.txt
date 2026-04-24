@@ -147,7 +147,9 @@ if(EXISTS "${PROJECT_SOURCE_DIR}/resources/rgb.png")
 
     _add_roundtrip_test(rgba8888 rgba8888 "")
     _add_roundtrip_test(bgra8888 bgra8888 "")
-    _add_roundtrip_test(rgb888   rgb888   "")
+    # rgb888 is alpha-less: forcing it via -alphaformat on a 4-channel input strips alpha,
+    # so imgdiff must ignore the alpha channel when scoring PSNR.
+    _add_roundtrip_test(rgb888   rgb888   "-DIGNORE_ALPHA=1")
     _add_roundtrip_test(rgba8888_nomips rgba8888 "-DNO_MIPMAPS=1")
 
     # Mipmap filter round-trip smoke: mip 0 should survive regardless of the chosen filter,

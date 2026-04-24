@@ -44,8 +44,12 @@ endif()
 list(APPEND _extra_args -nothumbnail)
 
 # 1) PNG → VTF.
+# vtfcmd's -format flag only sets NormalFormat (used for non-alpha input); a 4-channel PNG
+# falls through to AlphaFormat which defaults to DXT5. Pass -alphaformat too so the requested
+# format is used regardless of the input's channel count — otherwise the tests silently try
+# to DXT-encode and fail on Windows CI where Compressonator is off.
 execute_process(
-    COMMAND "${VTFCMD}" -file "${_staged_png}" -format "${FORMAT}" ${_extra_args} -output "${WORK_DIR}"
+    COMMAND "${VTFCMD}" -file "${_staged_png}" -format "${FORMAT}" -alphaformat "${FORMAT}" ${_extra_args} -output "${WORK_DIR}"
     RESULT_VARIABLE _rc1
     OUTPUT_VARIABLE _out1
     ERROR_VARIABLE _err1
@@ -127,8 +131,13 @@ if(IMGDIFF AND EXISTS "${IMGDIFF}")
     if(NOT DIFF_MIN_PSNR)
         set(DIFF_MIN_PSNR 20)
     endif()
+    set(_diff_cmd "${IMGDIFF}")
+    if(IGNORE_ALPHA)
+        list(APPEND _diff_cmd --ignore-alpha)
+    endif()
+    list(APPEND _diff_cmd "${_ref_png}" "${_out_png}" ${DIFF_TOL} ${DIFF_MIN_PSNR})
     execute_process(
-        COMMAND "${IMGDIFF}" "${_ref_png}" "${_out_png}" ${DIFF_TOL} ${DIFF_MIN_PSNR}
+        COMMAND ${_diff_cmd}
         RESULT_VARIABLE _rc3
         OUTPUT_VARIABLE _out3
         ERROR_VARIABLE _err3
