@@ -52,7 +52,13 @@ endif()
 
 set(_produced_vtf "${WORK_DIR}/${_name}.vtf")
 if(NOT EXISTS "${_produced_vtf}")
-    message(FATAL_ERROR "roundtrip: expected VTF not produced at '${_produced_vtf}'")
+    file(GLOB _stragglers "${WORK_DIR}/*")
+    message(FATAL_ERROR
+        "roundtrip: expected VTF not produced at '${_produced_vtf}'\n"
+        "vtfcmd exit=${_rc1}\n"
+        "vtfcmd stdout:\n${_out1}\n"
+        "vtfcmd stderr:\n${_err1}\n"
+        "work dir contents: ${_stragglers}")
 endif()
 
 file(SIZE "${_produced_vtf}" _vtf_size)

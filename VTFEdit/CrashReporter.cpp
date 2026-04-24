@@ -14,6 +14,10 @@
 #include <cstring>
 
 #if defined(Q_OS_WIN) || defined(_WIN32)
+    // Prevent <windows.h> from defining `min` / `max` as macros — we use std::min below.
+    #ifndef NOMINMAX
+        #define NOMINMAX
+    #endif
     #include <windows.h>
     #include <dbghelp.h>
     #pragma comment(lib, "dbghelp.lib")
@@ -161,7 +165,9 @@ void installCrashHandler() {
     const qint64 ms = QDateTime::currentMSecsSinceEpoch();
     const QString path = QDir(dir).filePath(QStringLiteral("crash-%1.txt").arg(ms));
     const QByteArray utf8 = path.toUtf8();
-    const size_t n = std::min(sizeof(g_crashPath) - 1, (size_t)utf8.size());
+    const size_t cap = sizeof(g_crashPath) - 1;
+    const size_t want = static_cast<size_t>(utf8.size());
+    const size_t n = (cap < want) ? cap : want;
     std::memcpy(g_crashPath, utf8.constData(), n);
     g_crashPath[n] = '\0';
 
