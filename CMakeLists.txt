@@ -13,7 +13,7 @@ endif()
 
 # QTFEdit (Qt) is the primary GUI going forward. The legacy WinForms GUI and
 # Visual Studio solutions live under `legacy/` and are frozen.
-project(QTFEdit VERSION 3.5.0 LANGUAGES C CXX)
+project(QTFEdit VERSION 3.5.1 LANGUAGES C CXX)
 
 option(VTFLIB_USE_COMPRESSONATOR "Link against AMD Compressonator if available" ON)
 option(BUILD_VTFCMD "Build VTFCmd CLI" ON)
