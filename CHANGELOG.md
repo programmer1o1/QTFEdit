@@ -1,15 +1,5 @@
 # Changelog
 
-## 3.5.1 — 2026-04-25
-
-### VTFLib
-
-- Fixed the root cause behind the Windows `core` CI failure on builds without Compressonator: high-level VTF creation no longer hard-fails while trying to generate the DXT1 low-res thumbnail. VTFLib now disables thumbnails by default on no-Compressonator builds and auto-drops thumbnail generation in the RGBA create path, so animated / cubemap VTF creation still succeeds.
-
-### Testing + CI
-
-- `mkanimvtf` no longer needs its own local thumbnail/DXT capability workaround because the fallback now lives in VTFLib itself. The Windows `core` matrix entry (`VTFLIB_USE_COMPRESSONATOR=OFF`) passes again.
-
 ## 3.5.0 — 2026-04-24
 
 ### Qt GUI (QTFEdit)
