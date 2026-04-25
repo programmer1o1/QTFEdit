@@ -673,6 +673,14 @@ vlBool CVTFFile::Create(vlUInt uiWidth, vlUInt uiHeight, vlUInt uiFrames, vlUInt
 		}
 
 		bool dxtFormat = ( VTFCreateOptions.ImageFormat == IMAGE_FORMAT_DXT1 || VTFCreateOptions.ImageFormat == IMAGE_FORMAT_DXT3 || VTFCreateOptions.ImageFormat == IMAGE_FORMAT_DXT5 );
+		vlBool createThumbnail = VTFCreateOptions.bThumbnail;
+
+#ifndef VTFLIB_HAS_COMPRESSONATOR
+		// VTFLib always stores low-res images as DXT1. On builds without Compressonator we
+		// can still create/read uncompressed VTFs, but we cannot encode the thumbnail body.
+		// Drop the thumbnail centrally here so high-level callers don't each need to special-case it.
+		createThumbnail = vlFalse;
+#endif
 
 		// Currently mipmaps are completely broken for DXT formats that use Multiple of Four resizing. Prevent it from making them.
 		bool allowMipmaps = !( dxtFormat && ( VTFCreateOptions.ResizeMethod == RESIZE_NEAREST_MULTIPLE4 ) );
@@ -680,7 +688,7 @@ vlBool CVTFFile::Create(vlUInt uiWidth, vlUInt uiHeight, vlUInt uiFrames, vlUInt
 		vlBool setMipmaps = vlBool(allowMipmaps && VTFCreateOptions.bMipmaps == true);
 			
 		// Create image (allocate and setup structures).
-		if(!this->Create(uiWidth, uiHeight, uiFrames, uiFaces + (VTFCreateOptions.bSphereMap && uiFaces == 6 ? 1 : 0), uiSlices, VTFCreateOptions.ImageFormat, VTFCreateOptions.bThumbnail, setMipmaps, vlFalse))
+		if(!this->Create(uiWidth, uiHeight, uiFrames, uiFaces + (VTFCreateOptions.bSphereMap && uiFaces == 6 ? 1 : 0), uiSlices, VTFCreateOptions.ImageFormat, createThumbnail, setMipmaps, vlFalse))
 		{
 			throw 0;
 		}
@@ -770,7 +778,7 @@ vlBool CVTFFile::Create(vlUInt uiWidth, vlUInt uiHeight, vlUInt uiFrames, vlUInt
 		}
 
 		// Generate thumbnail off mipmaps.
-		if(VTFCreateOptions.bThumbnail)
+		if(createThumbnail)
 		{
 			if(!this->GenerateThumbnail(VTFCreateOptions.bSRGB))
 			{

@@ -126,7 +126,12 @@ VTFLIB_API vlVoid vlImageCreateDefaultCreateStructure(SVTFCreateOptions *VTFCrea
 	VTFCreateOptions->uiResizeClampWidth = 4096;
 	VTFCreateOptions->uiResizeClampHeight = 4096;
 
-	VTFCreateOptions->bThumbnail = vlTrue;
+	VTFCreateOptions->bThumbnail =
+#ifdef VTFLIB_HAS_COMPRESSONATOR
+		vlTrue;
+#else
+		vlFalse;
+#endif
 	VTFCreateOptions->bReflectivity = vlTrue;
 
 	VTFCreateOptions->bGammaCorrection = vlFalse;

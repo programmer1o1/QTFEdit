@@ -84,7 +84,6 @@ int main(int argc, char **argv)
     vlImageCreateDefaultCreateStructure(&opts);
     opts.ImageFormat = IMAGE_FORMAT_RGBA8888;
     opts.bMipmaps = vlTrue;
-    opts.bThumbnail = vlTrue;
     if(cube_mode) {
         opts.uiFlags |= TEXTUREFLAGS_ENVMAP;
     }
